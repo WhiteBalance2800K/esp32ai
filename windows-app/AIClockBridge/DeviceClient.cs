@@ -18,6 +18,7 @@ class DeviceInfo
     public string Mode = "auto";       // configured: auto | claude | codex | net | music
     public string Effective = "auto";  // what's actually on screen (AUTO may promote to music)
     public string Showing = "";
+    public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
@@ -94,6 +95,7 @@ static class DeviceClient
                 Ssid = Str(root, "ssid"),
                 Bridge = Str(root, "bridge"),
                 Mode = Str(root, "mode", "auto"),
+                LastUpdateS = Int(root, "last_update_s", -1),
                 SpriteRev = Int(root, "sprite_rev"),
                 Showing = Str(root, "showing"),
             };
@@ -290,6 +292,50 @@ static class DeviceClient
         await Task.WhenAll(tasks);
         if (found != null) Host = found;
         return found;
+    }
+
+    // MARK: - pairing watchdog
+
+    /// Stamped on every device poll of our /status|/net|/music (see Program.cs).
+    public static DateTime DevicePollAt = DateTime.MinValue;
+
+    static bool _healInFlight;
+    static DateTime _lastHealAttempt = DateTime.MinValue;
+
+    /// Self-healing for the fresh-device chicken-and-egg: after a full flash
+    /// erase the clock knows no bridge host, so it never polls us and passive
+    /// discovery never fires. When we haven't heard from the device for a few
+    /// minutes, actively find it (last-seen IP, configured host, then /24
+    /// scan) and, if its bridge is unset or it can't reach the one it has,
+    /// point it at this PC. Called from a 60s timer; the /24 scan is
+    /// rate-limited to once per 5 minutes.
+    public static async Task HealPairingIfNeeded(int port)
+    {
+        if (DateTime.UtcNow - DevicePollAt < TimeSpan.FromMinutes(3)) return; // device is polling us
+        if (_healInFlight || DateTime.UtcNow - _lastHealAttempt < TimeSpan.FromMinutes(5)) return;
+        _healInFlight = true;
+        _lastHealAttempt = DateTime.UtcNow;
+        try
+        {
+            if (await AutoPair(_ => { }) == null) return;
+            var info = await FetchInfo();
+            var myIp = LocalIPv4();
+            if (myIp == null) return;
+            var stale = info.LastUpdateS < 0 || info.LastUpdateS > 60;
+            if (info.Bridge.Length == 0 || stale)
+            {
+                await SetBridgeHost($"{myIp}:{port}");
+                Console.Error.WriteLine($"[pair] pushed bridge {myIp}:{port} to {info.Ip}");
+            }
+        }
+        catch (DeviceException)
+        {
+            // device vanished mid-heal; next tick retries
+        }
+        finally
+        {
+            _healInFlight = false;
+        }
     }
 
     /// LAN IPv4 of this PC — used for one-click "point the device's bridge at

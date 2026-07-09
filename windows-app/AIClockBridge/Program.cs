@@ -82,9 +82,16 @@ static class Program
         {
             if (path != "/status" && path != "/net" && path != "/music") return;
             if (ip == "127.0.0.1" || ip == "::1" || ip.Length == 0) return;
+            DeviceClient.DevicePollAt = DateTime.UtcNow;
             DeviceClient.LastSeenIp = ip;
             if (DeviceClient.Host.Length == 0) DeviceClient.Host = ip;
         };
+        // Active fallback for when the passive route can't fire at all (fresh /
+        // erased device knows no bridge host, so it never polls anyone): if the
+        // device stays silent, find it ourselves and hand it our address.
+        using var pairingWatchdog = new System.Threading.Timer(
+            _ => _ = DeviceClient.HealPairingIfNeeded(Port), null,
+            TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
 
         try
         {

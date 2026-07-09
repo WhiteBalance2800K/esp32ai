@@ -11,6 +11,7 @@ struct DeviceInfo {
     var mode = "auto"       // configured: auto | claude | codex | net | music
     var effective = "auto"  // what's actually on screen (AUTO may promote to music)
     var showing = ""
+    var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
     var claudeCustomSprite = false
     var codexCustomSprite = false
@@ -60,6 +61,7 @@ final class DeviceClient {
                 info.mode = obj["mode"] as? String ?? "auto"
                 info.effective = obj["effective"] as? String ?? info.mode
                 info.showing = obj["showing"] as? String ?? ""
+                info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
                 info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
                 let claude = obj["claude"] as? [String: Any]
                 let codex = obj["codex"] as? [String: Any]
@@ -274,6 +276,41 @@ final class DeviceClient {
             group.notify(queue: .main) {
                 if let ip = found { host = ip }
                 completion(found)
+            }
+        }
+    }
+
+    // MARK: - pairing watchdog
+
+    /// Stamped on every device poll of our /status|/net|/music (see main.swift).
+    static var devicePollAt = Date.distantPast
+
+    private static var healInFlight = false
+    private static var lastHealAttempt = Date.distantPast
+
+    /// Self-healing for the fresh-device chicken-and-egg: after a full flash
+    /// erase the clock knows no bridge host, so it never polls us and passive
+    /// discovery never fires. When we haven't heard from the device for a few
+    /// minutes, actively find it (last-seen IP, configured host, then /24
+    /// scan) and, if its bridge is unset or it can't reach the one it has,
+    /// point it at this Mac. Called from a 60s timer; the /24 scan is
+    /// rate-limited to once per 5 minutes.
+    static func healPairingIfNeeded(port: UInt16) {
+        guard Date().timeIntervalSince(devicePollAt) > 180 else { return } // device is polling us
+        guard !healInFlight, Date().timeIntervalSince(lastHealAttempt) > 300 else { return }
+        healInFlight = true
+        lastHealAttempt = Date()
+        autoPair(progress: { _ in }) { ip in
+            guard ip != nil else { healInFlight = false; return }
+            fetchInfo { result in
+                defer { healInFlight = false }
+                guard case let .success(info) = result, let myIP = localIPv4() else { return }
+                let stale = info.lastUpdateS < 0 || info.lastUpdateS > 60
+                guard info.bridge.isEmpty || stale else { return }
+                setBridgeHost("\(myIP):\(port)") { error in
+                    FileHandle.standardError.write(Data(
+                        "[pair] pushed bridge \(myIP):\(port) to \(info.ip): \(error.map { "\($0.localizedDescription)" } ?? "ok")\n".utf8))
+                }
             }
         }
     }

@@ -69,8 +69,15 @@ let server = HTTPServer(port: port, routes: [
 server.onRequest = { path, ip in
     guard path == "/status" || path == "/net" || path == "/music",
           ip != "127.0.0.1", ip != "::1", !ip.isEmpty else { return }
+    DeviceClient.devicePollAt = Date()
     DeviceClient.lastSeenIP = ip
     if DeviceClient.host.isEmpty { DeviceClient.host = ip }
+}
+// Active fallback for when the passive route can't fire at all (fresh /
+// erased device knows no bridge host, so it never polls anyone): if the
+// device stays silent, find it ourselves and hand it our address.
+Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
+    DeviceClient.healPairingIfNeeded(port: port)
 }
 
 do {
