@@ -342,6 +342,12 @@ sealed class MirrorForm : Form
     static readonly string[] Modes = { "auto", "claude", "codex", "net", "music" };
     static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐" };
     readonly Label _statusLabel = new();
+    readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
+    readonly Label _brightnessValue = new();
+    // Drag streams many scroll events; posts to the single-threaded ESP8266 web
+    // server are throttled mid-drag and the final value always flushes on mouse-up.
+    int? _pendingBrightness;
+    DateTime _lastBrightnessSentAt = DateTime.MinValue;
 
     readonly System.Windows.Forms.Timer _pollTimer = new() { Interval = 1000 };
     readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 120 };
@@ -368,7 +374,7 @@ sealed class MirrorForm : Form
         BackColor = SystemColors.Control;
         Padding = new Padding(1);
 
-        ClientSize = new Size(Px(316), Px(392));
+        ClientSize = new Size(Px(316), Px(424));
 
         _mirror.SetBounds(Px(14), Px(14), Px(288), Px(288));
         Controls.Add(_mirror);
@@ -391,7 +397,26 @@ sealed class MirrorForm : Form
             Controls.Add(btn);
         }
 
-        _statusLabel.SetBounds(Px(10), Px(348), Px(296), Px(36));
+        var sunLabel = new Label
+        {
+            Text = "☀",
+            TextAlign = ContentAlignment.MiddleCenter,
+            ForeColor = SystemColors.GrayText,
+        };
+        sunLabel.SetBounds(Px(12), Px(346), Px(24), Px(26));
+        Controls.Add(sunLabel);
+        _brightness.SetBounds(Px(36), Px(346), Px(216), Px(26));
+        _brightness.Scroll += (_, _) => OnBrightnessInput(final: false);
+        _brightness.MouseUp += (_, _) => OnBrightnessInput(final: true);
+        Controls.Add(_brightness);
+        _brightnessValue.SetBounds(Px(254), Px(346), Px(48), Px(26));
+        _brightnessValue.TextAlign = ContentAlignment.MiddleRight;
+        _brightnessValue.ForeColor = SystemColors.GrayText;
+        _brightnessValue.Font = new Font("Microsoft YaHei UI", 8.5f);
+        _brightnessValue.Text = "100%";
+        Controls.Add(_brightnessValue);
+
+        _statusLabel.SetBounds(Px(10), Px(378), Px(296), Px(36));
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.ForeColor = SystemColors.GrayText;
         _statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
@@ -454,6 +479,34 @@ sealed class MirrorForm : Form
         base.OnFormClosing(e);
     }
 
+    void OnBrightnessInput(bool final)
+    {
+        var level = _brightness.Value;
+        _brightnessValue.Text = $"{level}%";
+        _pendingBrightness = level;
+        if (!final && (DateTime.Now - _lastBrightnessSentAt).TotalMilliseconds < 250) return;
+        FlushBrightness();
+    }
+
+    void FlushBrightness()
+    {
+        if (_pendingBrightness is not int level) return;
+        _pendingBrightness = null;
+        _lastBrightnessSentAt = DateTime.Now;
+        _ = DeviceClient.SetBrightness(level);
+    }
+
+    /// Follow the device's reported brightness (changed via its web page or
+    /// another client) — but never while the user is mid-adjustment here.
+    void SyncBrightness(DeviceInfo info)
+    {
+        if (_pendingBrightness != null ||
+            (DateTime.Now - _lastBrightnessSentAt).TotalSeconds < 2) return;
+        var level = Math.Clamp(info.Brightness, 0, 100);
+        _brightness.Value = level;
+        _brightnessValue.Text = $"{level}%";
+    }
+
     /// One sweep step: push the newest 4Hz sample, refresh the DL/UL readout.
     void SweepTick()
     {
@@ -486,6 +539,7 @@ sealed class MirrorForm : Form
         _mirror.DeviceOK = true;
         ApplyScene(info);
         EnsureSprite(info);
+        SyncBrightness(info);
         var modeIdx = Math.Max(0, Array.IndexOf(Modes, info.Mode));
         _applyingMode = true;
         _modeButtons[modeIdx].Checked = true;

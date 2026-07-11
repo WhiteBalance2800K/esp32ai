@@ -164,6 +164,34 @@ unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
 
+// ---------- backlight brightness ----------
+// The panel backlight (TFT_BL, active LOW) is PWM-dimmable — the vendor's own
+// firmware does the same. 0 = off, 100 = full. Persisted so it survives reboot.
+
+int brightness = BRIGHTNESS_DEFAULT; // 0-100
+
+void applyBrightness() {
+  // analogWriteRange(100) is set in setup(), so the duty value is just the
+  // inverted percentage (active LOW: 0 duty = always LOW = full on).
+  analogWrite(TFT_BL, 100 - brightness);
+}
+
+void loadBrightness() {
+  if (!LittleFS.exists(BRIGHTNESS_FILE)) return;
+  File f = LittleFS.open(BRIGHTNESS_FILE, "r");
+  if (!f) return;
+  int v = f.readStringUntil('\n').toInt();
+  f.close();
+  if (v >= 0 && v <= 100) brightness = v;
+}
+
+void saveBrightness() {
+  File f = LittleFS.open(BRIGHTNESS_FILE, "w");
+  if (!f) return;
+  f.println(brightness);
+  f.close();
+}
+
 // ---------- persistence for the bridge host ----------
 
 void loadBridgeHost() {
@@ -1114,6 +1142,15 @@ void handleRoot() {
   html += "<button type='submit'>保存</button>";
   html += "</form>";
 
+  // Backlight brightness slider: applies live on release (PWM, persisted).
+  html += "<h2 style='font-size:16px;margin-top:28px'>屏幕亮度</h2>";
+  html += "<input type='range' min='0' max='100' value='" + String(brightness) + "' id='bri' "
+          "oninput=\"document.getElementById('briv').textContent=this.value+'%'\" "
+          "onchange=\"fetch('/api/brightness',{method:'POST',headers:{'Content-Type':"
+          "'application/x-www-form-urlencoded'},body:'level='+this.value})\">";
+  html += "<div style='font-size:13px;color:#555'>当前：<span id='briv'>" + String(brightness) +
+          "%</span>（0 = 熄屏，设置立即生效并记住）</div>";
+
   // On-device GIF upload: replaces a character's animation without reflashing.
   html += "<h2 style='font-size:16px;margin-top:28px'>桌宠动画（上传 GIF）</h2>";
   html += "<p style='font-size:13px;color:#555'>上传一个 .gif，设备会在板上解码并缩放到对应角色的尺寸，"
@@ -1179,6 +1216,7 @@ void handleApiInfo() {
   doc["showing"] = (currentApp == APP_CLAUDE) ? "claude" : "codex";
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
   doc["sprite_rev"] = spriteRev;
+  doc["brightness"] = brightness;
   doc["fw"] = FW_VERSION;
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
@@ -1217,6 +1255,22 @@ void handleApiDisplay() {
     updateActiveApp();
     drawActiveApp(); // unconditional: also repaints over a previous net chart
   }
+  webServer.send(200, "text/plain", "ok");
+}
+
+void handleApiBrightness() {
+  String levelArg = webServer.arg("level");
+  if (levelArg.length() == 0) {
+    webServer.send(400, "text/plain", "missing level (0-100)");
+    return;
+  }
+  int level = levelArg.toInt();
+  if (level < 0) level = 0;
+  if (level > 100) level = 100;
+  brightness = level;
+  applyBrightness();
+  saveBrightness();
+  Serial.printf("[api] brightness = %d\n", brightness);
   webServer.send(200, "text/plain", "ok");
 }
 
@@ -1516,6 +1570,7 @@ void setupWebServer() {
   webServer.on("/api/info", HTTP_GET, handleApiInfo);
   webServer.on("/api/display", HTTP_POST, handleApiDisplay);
   webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
+  webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
   webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
@@ -1536,11 +1591,15 @@ void setup() {
   Serial.begin(115200);
   LittleFS.begin();
   loadBridgeHost();
+  loadBrightness();
   loadCustomSpriteState();
 
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
+  analogWriteFreq(BRIGHTNESS_PWM_FREQ);
+  analogWriteRange(100); // duty maps 1:1 to a 0-100 percentage
+  applyBrightness();
 
   setupWiFi();
   setupWebServer();

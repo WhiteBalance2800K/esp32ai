@@ -88,6 +88,7 @@ sealed class TrayAppContext : ApplicationContext
             displayMenu.DropDownItems.Add(item);
         }
         _menu.Items.Add(displayMenu);
+        // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         _menu.Items.Add(MakeItem("更换桌宠动画…（petdex）", (_, _) => OpenPetPicker()));
 

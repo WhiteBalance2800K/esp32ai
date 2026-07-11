@@ -13,6 +13,7 @@ struct DeviceInfo {
     var showing = ""
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
+    var brightness = 100    // backlight 0-100 (0 = off)
     var claudeCustomSprite = false
     var codexCustomSprite = false
     var claudeW = 111, claudeH = 120
@@ -63,6 +64,7 @@ final class DeviceClient {
                 info.showing = obj["showing"] as? String ?? ""
                 info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
                 info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
+                info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
                 let claude = obj["claude"] as? [String: Any]
                 let codex = obj["codex"] as? [String: Any]
                 info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
@@ -87,6 +89,11 @@ final class DeviceClient {
     /// POST /api/bridge  host=ip:port
     static func setBridgeHost(_ bridgeHost: String, completion: @escaping (Error?) -> Void) {
         postForm(path: "api/bridge", fields: ["host": bridgeHost], completion: completion)
+    }
+
+    /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
+    static func setBrightness(_ level: Int, completion: @escaping (Error?) -> Void) {
+        postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
     }
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes

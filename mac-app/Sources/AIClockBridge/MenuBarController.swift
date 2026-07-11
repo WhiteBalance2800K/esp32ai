@@ -91,6 +91,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let displayItem = NSMenuItem(title: "屏幕显示", action: nil, keyEquivalent: "")
         displayItem.submenu = displayMenu
         menu.addItem(displayItem)
+        // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         menu.addItem(makeItem("更换桌宠动画…（petdex）", #selector(openPetPicker)))
 

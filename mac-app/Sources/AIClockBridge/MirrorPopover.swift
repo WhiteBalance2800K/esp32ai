@@ -371,6 +371,13 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
+    private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
+                                            target: nil, action: nil)
+    private let brightnessValueLabel = NSTextField(labelWithString: "100%")
+    // Drag streams many slider events; posts to the single-threaded ESP8266 web
+    // server are throttled mid-drag and the final value always flushes on mouse-up.
+    private var pendingBrightness: Int?
+    private var lastBrightnessSentAt = Date.distantPast
 
     private var pollTimer: Timer?
     private var animTimer: Timer?
@@ -391,7 +398,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     private func makeContent() -> NSViewController {
         let vc = NSViewController()
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 316, height: 392))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 316, height: 424))
 
         modeControl.target = self
         modeControl.action = #selector(modeChanged)
@@ -400,7 +407,17 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         statusLabel.alignment = .center
         statusLabel.lineBreakMode = .byTruncatingMiddle
 
-        for v in [mirror, modeControl, statusLabel] {
+        brightnessSlider.target = self
+        brightnessSlider.action = #selector(brightnessChanged)
+        brightnessSlider.isContinuous = true
+        brightnessValueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        brightnessValueLabel.textColor = .secondaryLabelColor
+        brightnessValueLabel.alignment = .right
+        let brightnessIcon = NSImageView(image: NSImage(systemSymbolName: "sun.max.fill",
+                                                        accessibilityDescription: "亮度") ?? NSImage())
+        brightnessIcon.contentTintColor = .secondaryLabelColor
+
+        for v in [mirror, modeControl, brightnessIcon, brightnessSlider, brightnessValueLabel, statusLabel] {
             v.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(v)
         }
@@ -411,12 +428,38 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.heightAnchor.constraint(equalToConstant: 288),
             modeControl.topAnchor.constraint(equalTo: mirror.bottomAnchor, constant: 12),
             modeControl.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            statusLabel.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 8),
+            brightnessIcon.centerYAnchor.constraint(equalTo: brightnessSlider.centerYAnchor),
+            brightnessIcon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            brightnessSlider.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 10),
+            brightnessSlider.leadingAnchor.constraint(equalTo: brightnessIcon.trailingAnchor, constant: 8),
+            brightnessSlider.trailingAnchor.constraint(equalTo: brightnessValueLabel.leadingAnchor, constant: -8),
+            brightnessValueLabel.centerYAnchor.constraint(equalTo: brightnessSlider.centerYAnchor),
+            brightnessValueLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            brightnessValueLabel.widthAnchor.constraint(equalToConstant: 40),
+            statusLabel.topAnchor.constraint(equalTo: brightnessSlider.bottomAnchor, constant: 8),
             statusLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
             statusLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
         ])
         vc.view = container
         return vc
+    }
+
+    // MARK: - brightness slider
+
+    @objc private func brightnessChanged() {
+        let level = Int(brightnessSlider.doubleValue.rounded())
+        brightnessValueLabel.stringValue = "\(level)%"
+        let isFinal = NSApp.currentEvent.map { $0.type != .leftMouseDragged } ?? true
+        pendingBrightness = level
+        if !isFinal && Date().timeIntervalSince(lastBrightnessSentAt) < 0.25 { return }
+        flushBrightness()
+    }
+
+    private func flushBrightness() {
+        guard let level = pendingBrightness else { return }
+        pendingBrightness = nil
+        lastBrightnessSentAt = Date()
+        DeviceClient.setBrightness(level) { _ in }
     }
 
     func toggle(relativeTo button: NSStatusBarButton) {
@@ -475,6 +518,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.mirror.deviceOK = true
                 self.applyScene(info)
                 self.ensureSprite(info)
+                self.syncBrightness(info)
                 let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
@@ -488,6 +532,15 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                     ? "未设置设备地址（右键菜单 → 设置设备地址）" : "无法连接 \(DeviceClient.host)"
             }
         }
+    }
+
+    /// Follow the device's reported brightness (changed via its web page or
+    /// another client) — but never while the user is mid-adjustment here.
+    private func syncBrightness(_ info: DeviceInfo) {
+        guard pendingBrightness == nil,
+              Date().timeIntervalSince(lastBrightnessSentAt) > 2 else { return }
+        brightnessSlider.doubleValue = Double(info.brightness)
+        brightnessValueLabel.stringValue = "\(info.brightness)%"
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.

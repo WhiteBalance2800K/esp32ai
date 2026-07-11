@@ -20,6 +20,7 @@ class DeviceInfo
     public string Showing = "";
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
+    public int Brightness = 100;       // backlight 0-100 (0 = off)
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
@@ -97,6 +98,7 @@ static class DeviceClient
                 Mode = Str(root, "mode", "auto"),
                 LastUpdateS = Int(root, "last_update_s", -1),
                 SpriteRev = Int(root, "sprite_rev"),
+                Brightness = Int(root, "brightness", 100),
                 Showing = Str(root, "showing"),
             };
             info.Effective = Str(root, "effective", info.Mode);
@@ -127,6 +129,10 @@ static class DeviceClient
     /// POST /api/bridge  host=ip:port
     public static Task SetBridgeHost(string bridgeHost) =>
         PostForm("api/bridge", new() { ["host"] = bridgeHost });
+
+    /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
+    public static Task SetBrightness(int level) =>
+        PostForm("api/brightness", new() { ["level"] = level.ToString() });
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.
