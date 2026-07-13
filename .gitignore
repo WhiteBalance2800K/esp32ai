@@ -8,3 +8,5 @@ __pycache__/
 .DS_Store
 .claude/
 dist/
+device-backups/
+esp32c3-backup*.bin

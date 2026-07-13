@@ -2,9 +2,9 @@
   <img src="docs/images/logo.svg" width="72" alt="logo">
 </p>
 
-<h1 align="center">AI Mac Mini Display</h1>
+<h1 align="center">ESP32 AI Mini Display</h1>
 
-<p align="center">A tiny AI status computer for your desk — ESP8266 · Open Source Hardware · Desktop Companion</p>
+<p align="center">ESP32-C3 / ESP8266 · 240×240 TFT · Claude Code / Codex desktop companion</p>
 
 <p align="center">
   <a href="README.md">中文</a> ·
@@ -12,10 +12,40 @@
 </p>
 
 <p align="center">
-  <a href="https://mac.qust.me">Website</a> ·
-  <a href="https://mac.qust.me/#flash">Web Flasher</a> ·
-  <a href="https://github.com/pengchujin/esp8266-ai/releases/latest">Download</a>
+  <a href="docs/ESP32-C3.md">ESP32-C3 flashing guide</a> ·
+  <a href="web-flasher/">Web flasher</a> ·
+  <a href="https://github.com/pengchujin/esp8266-ai">Upstream ESP8266 project</a>
 </p>
+
+## Read first: getting the 1.54-inch ESP32-C3 display to light up
+
+The misleading failure mode is a completely black screen with faint light visible from the side,
+while firmware logs, Wi-Fi, the admin page, and the bridge all work normally. The original schematic
+screenshot was easy to read one row off. We recovered the actual display setup from a read-only
+analysis of the board's backed-up factory Flash: it uses TFT_eSPI's `ST7789_2_DRIVER` and calls
+`SPI.begin(3, 5, 5, -1)`.
+
+| Signal | ESP32-C3 GPIO | Notes |
+|---|---:|---|
+| Backlight | 1 | Active LOW through AO3401 |
+| DC | 2 | Data/command |
+| SCLK | 3 | SPI clock |
+| MOSI | 5 | SPI data |
+| MISO | 5 | Write-only display; placeholder required for C3 SPI initialization |
+| RESET | 6 | Hardware reset |
+| CS | `-1` | Not routed to the MCU; display stays selected |
+
+Back up the complete 4MB Flash before replacing factory firmware, do not modify eFuses, and do not
+assume that an ESP8266 pin map carries over to ESP32-C3. The build now checks this known-good pin map
+at compile time and again when generating the Web image. See the
+[ESP32-C3 backup, recovery, and flashing guide](docs/ESP32-C3.md) for the complete procedure.
+
+To use the bundled flasher locally, run `python3 -m http.server 8000` from the repository root and
+open `http://localhost:8000/web-flasher/` in desktop Chrome or Edge. The verified build is
+`0.4.6-c3.5`.
+
+> This port is based on [pengchujin/esp8266-ai](https://github.com/pengchujin/esp8266-ai).
+> ESP32-C3 is now the default target; the original `nodemcuv2` ESP8266 target remains available.
 
 <p align="center">
   <img src="docs/images/hero.jpg" width="640" alt="AI Mac Mini Display">
@@ -72,7 +102,7 @@ Daily use is all on the tray icon: **left-click** opens a live mirror of the dev
 ## Development
 
 ```
-firmware/     ESP8266 firmware (PlatformIO + Arduino, with on-board GIF decoding)
+firmware/     ESP32-C3 / ESP8266 firmware (PlatformIO + Arduino, with on-board GIF decoding)
 mac-app/      macOS menu bar bridge (Swift/SPM, zero third-party dependencies)
 windows-app/  Windows tray bridge (C# / .NET 8 WinForms)
 tools/        GIF → RGB565 built-in sprite conversion script

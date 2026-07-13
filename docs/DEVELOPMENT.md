@@ -127,7 +127,7 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
 cd firmware
 python3 -m venv .pio-venv && source .pio-venv/bin/activate
 pip install platformio
-pio run -t upload          # 已验证：编译成功，Flash 45.7%，RAM 39.7%
+pio run -e nodemcuv2 -t upload  # ESP8266：编译 + USB 烧录
 ```
 
 烧录后串口会打印调试日志（这版固件不再是"静默"的）：
@@ -148,7 +148,7 @@ pio run -t upload          # 已验证：编译成功，Flash 45.7%，RAM 39.7%
 查看串口日志：
 
 ```bash
-pio device monitor -b 115200
+pio device monitor -e nodemcuv2 -b 115200
 ```
 
 ## 3. 屏幕布局
@@ -300,5 +300,6 @@ ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedG
   沿用旧值，偶尔菜单里额度会显示为几分钟前的数据。
 - 未做开机自启 LaunchAgent，需要的话可以再加（见第 1 节）。
 - 改**默认**编译进固件的动画（`firmware/include/img/claude_sprite.h` /
-  `codex_sprite.h`）仍可用 `tools/convert_sprites.py` 生成新的 `.h` 后 `pio run -t upload`；
+  `codex_sprite.h`）仍可用 `tools/convert_sprites.py` 生成新的 `.h` 后
+  `pio run -e nodemcuv2 -t upload`；
   日常换形象用菜单栏 petdex 选择器或设备网页即可，无需烧录。

@@ -1,7 +1,12 @@
 #pragma once
 
 // ---- Firmware version (shown on the first-time WiFi setup screen & /api/info) ----
+#define FW_VERSION_ESP32_C3 "0.4.6-c3.5"
+#if defined(ESP32)
+#define FW_VERSION FW_VERSION_ESP32_C3
+#else
 #define FW_VERSION "0.4.6"
+#endif
 
 // ---- Bridge polling ----
 #define BRIDGE_DEFAULT_PORT 8765

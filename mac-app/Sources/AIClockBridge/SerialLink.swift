@@ -1,8 +1,10 @@
 import Foundation
+import IOKit
+import IOKit.serial
 
 // Wired (USB serial) transport to the clock, for WiFi networks with client
-// isolation - or for skipping WiFi setup entirely. Scans for CH340-style
-// serial ports, handshakes, then pushes the same payloads the device would
+// isolation - or for skipping WiFi setup entirely. Scans for CH340-style and
+// native USB CDC serial ports, handshakes, then pushes the same payloads the device would
 // otherwise poll over HTTP, as newline-terminated frames:
 //   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
 //   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
@@ -23,6 +25,7 @@ final class SerialLink {
     private var lastNetAt = Date.distantPast
     private var rxBuf = Data()
     private var timer: Timer?
+    private var candidateCursor = 0
 
     init(service: StatusService, netMonitor: NetSpeedMonitor) {
         self.service = service
@@ -79,12 +82,59 @@ final class SerialLink {
 
     private func scanAndOpen() {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
+        let nativeEspressifPorts = espressifNativePorts()
         let candidates = names.filter {
-            $0.hasPrefix("cu.usbserial") || $0.hasPrefix("cu.wchusbserial")
+            $0.hasPrefix("cu.usbserial") || $0.hasPrefix("cu.wchusbserial") ||
+                nativeEspressifPorts.contains("/dev/" + $0)
         }.sorted()
-        for name in candidates where openPort("/dev/" + name) {
+        guard !candidates.isEmpty else {
+            candidateCursor = 0
             return
         }
+        let start = candidateCursor % candidates.count
+        for offset in 0..<candidates.count {
+            let index = (start + offset) % candidates.count
+            if openPort("/dev/" + candidates[index]) {
+                candidateCursor = (index + 1) % candidates.count
+                return
+            }
+        }
+        candidateCursor = (start + 1) % candidates.count
+    }
+
+    // Native C3 USB Serial/JTAG is fixed at Espressif VID:PID 303A:1001.
+    // Restrict the broader cu.usbmodem namespace before sending host telemetry.
+    private func espressifNativePorts() -> Set<String> {
+        guard let matching = IOServiceMatching(kIOSerialBSDServiceValue) else { return [] }
+
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return []
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var ports = Set<String>()
+        while true {
+            let service = IOIteratorNext(iterator)
+            if service == 0 { break }
+            defer { IOObjectRelease(service) }
+
+            guard registryInt(service, key: "idVendor") == 0x303A,
+                  registryInt(service, key: "idProduct") == 0x1001,
+                  let value = IORegistryEntryCreateCFProperty(
+                      service, kIOCalloutDeviceKey as CFString, kCFAllocatorDefault, 0
+                  )?.takeRetainedValue() as? String else { continue }
+            ports.insert(value)
+        }
+        return ports
+    }
+
+    private func registryInt(_ service: io_registry_entry_t, key: String) -> Int? {
+        let options = IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents)
+        guard let value = IORegistryEntrySearchCFProperty(
+            service, kIOServicePlane, key as CFString, kCFAllocatorDefault, options
+        ) as? NSNumber else { return nil }
+        return value.intValue
     }
 
     private func openPort(_ path: String) -> Bool {

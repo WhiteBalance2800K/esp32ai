@@ -1,0 +1,5 @@
+/web-flasher/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+  Permissions-Policy: serial=(self)
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY

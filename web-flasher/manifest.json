@@ -1,0 +1,17 @@
+{
+  "name": "AI Clock ESP32-C3",
+  "version": "0.4.6-c3.5",
+  "new_install_prompt_erase": true,
+  "new_install_improv_wait_time": 0,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C3",
+      "parts": [
+        {
+          "path": "firmware/esp32c3-ai-clock-0.4.6-c3.5-fb5ae7e3a0f9.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

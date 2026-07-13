@@ -2,9 +2,9 @@
   <img src="docs/images/logo.svg" width="72" alt="logo">
 </p>
 
-<h1 align="center">AI Mac 小屏幕</h1>
+<h1 align="center">ESP32 AI 小屏幕</h1>
 
-<p align="center">桌上的一台 AI 状态小电脑 —— ESP8266 · 开源硬件 · 桌面伴侣</p>
+<p align="center">ESP32-C3 / ESP8266 · 240×240 TFT · Claude Code / Codex 桌面伴侣</p>
 
 <p align="center">
   中文 ·
@@ -12,10 +12,62 @@
 </p>
 
 <p align="center">
-  <a href="https://mac.qust.me">官网</a> ·
-  <a href="https://mac.qust.me/#flash">网页刷机</a> ·
-  <a href="https://github.com/pengchujin/esp8266-ai/releases/latest">下载</a>
+  <a href="docs/ESP32-C3.md">ESP32-C3 烧录说明</a> ·
+  <a href="web-flasher/">Web 烧录器</a> ·
+  <a href="https://github.com/pengchujin/esp8266-ai">上游 ESP8266 项目</a>
 </p>
+
+## 先看：ESP32-C3 1.54 寸屏幕点亮避坑
+
+这个移植最容易出现的现象是：**固件正常启动、Wi-Fi 和桥接程序都能通信，但屏幕全黑，
+只能从侧面看到微弱闪烁。** 此时不要先怀疑屏幕损坏，也不要照搬 ESP8266 的引脚。
+
+我们最初根据低清原理图截图读出了错误的 GPIO，屏幕始终没有数据。最终从烧录前保存的
+4MB 原厂 Flash 中只读分析出原厂 `TFT_eSPI` 初始化代码，确认它使用
+`ST7789_2_DRIVER`，并实际调用 `SPI.begin(3, 5, 5, -1)`。原厂 GPIO 设置和本项目采用的
+最终引脚如下：
+
+| 信号 | ESP32-C3 GPIO | 说明 |
+|---|---:|---|
+| LCD_BL | 1 | AO3401 控制，**低电平点亮** |
+| LCD_DC | 2 | 数据/命令选择 |
+| LCD_SCL / SCLK | 3 | SPI 时钟 |
+| LCD_SDA / MOSI | 5 | SPI 数据 |
+| MISO | 5 | 屏幕只写；与 MOSI 同脚仅用于满足 C3 SPI 初始化 |
+| LCD_RESET | 6 | 屏幕硬复位 |
+| CS | `-1` | PCB 未接 MCU，屏幕保持选中 |
+
+几个值得保留的经验：
+
+1. **先备份再烧录。** 读取完整 4MB Flash，不要一上来执行 `erase-flash`；原厂备份既能恢复，
+   也能在原理图不清楚时反向确认真实初始化参数。
+2. **分辨率相同不等于驱动配置相同。** 这块 240×240 屏需要 TFT_eSPI 的
+   `ST7789_2_DRIVER`；普通 `ST7789_DRIVER` 和错误 GPIO 都不会点亮。
+3. **`MISO=MOSI` 不是接线错误。** 该屏幕没有回读数据，GPIO5 作为占位 MISO 是原厂固件和
+   TFT_eSPI 在 ESP32-C3 上采用的初始化方式。
+4. **日志正常不代表显示总线正常。** Wi-Fi、Web 管理页和 Mac 桥接均可工作，而屏幕仍因
+   SCLK/MOSI/DC/RST 任一错误保持全黑。
+5. **不要动 eFuse 或安全启动配置。** 普通应用固件不会覆盖 ROM 下载模式；烧录失败时按住
+   BOOT、点按 RESET 后仍可重新写入。
+
+本仓库的 C3 构建会静态校验这组引脚，Web 固件构建脚本也会再次检查，避免后续改动悄悄
+破坏已验证配置。完整备份、恢复、串口烧录和故障排查见
+[ESP32-C3 安全烧录文档](docs/ESP32-C3.md)。
+
+### 本机 Web 烧录
+
+```bash
+cd /path/to/esp32ai
+python3 -m http.server 8000
+```
+
+用桌面版 Chrome / Edge 打开 `http://localhost:8000/web-flasher/`，确认版本为
+`0.4.6-c3.5` 后连接 ESP32-C3。当前 Web 固件已在上述成品板实机点亮；首次安装会重写分区
+和 Wi-Fi 配置，烧录完成后需要重新配网。
+
+> 本项目基于 [pengchujin/esp8266-ai](https://github.com/pengchujin/esp8266-ai) 移植。
+> 默认目标现为 4MB Flash、原生 USB 的 ESP32-C3，原 ESP8266 构建环境仍保留为
+> `nodemcuv2`。
 
 <p align="center">
   <img src="docs/images/hero.jpg" width="640" alt="AI Mac 小屏幕">
@@ -33,6 +85,9 @@
 | <img src="docs/images/feature3.jpg" width="360" alt="桌宠可换"> | **可换桌宠**<br>内置 [petdex.dev](https://petdex.dev) 画廊 3300+ 开源桌宠，也可上传任意 GIF，设备板上直接解码，无需重烧固件。 |
 
 ## 快速上手
+
+以下步骤是上游 ESP8266 / SD2 小电视的使用方式。ESP32-C3 请优先按上面的实机配置和
+[专用烧录文档](docs/ESP32-C3.md)操作。
 
 需要的东西：一台「SD2 小电视」开发板（[开源硬件](https://oshwhub.com/q21182889/sd2)，也可[直接购买成品](https://mobile.yangkeduo.com/goods.html?ps=OuBjGMWE82)）、一根 USB **数据**线。
 
@@ -72,7 +127,7 @@
 ## 开发
 
 ```
-firmware/     ESP8266 固件（PlatformIO + Arduino，含板上 GIF 解码）
+firmware/     ESP32-C3 / ESP8266 固件（PlatformIO + Arduino，含板上 GIF 解码）
 mac-app/      macOS 菜单栏桥接（Swift/SPM，零第三方依赖）
 windows-app/  Windows 托盘桥接（C# / .NET 8 WinForms）
 tools/        GIF → RGB565 内置精灵图转换脚本

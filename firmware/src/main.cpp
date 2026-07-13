@@ -1,4 +1,4 @@
-// ESP8266 WiFi clock: shows local time plus live Claude Code / Codex CLI
+// ESP32-C3 / ESP8266 AI clock: shows live Claude Code / Codex CLI
 // working status and usage quota, polled from a small bridge service that
 // runs on the developer's Mac (see ../bridge/bridge.py).
 //
@@ -6,15 +6,31 @@
 // in platformio.ini - edit those if your wiring differs.
 
 #include <Arduino.h>
+#if defined(ESP32)
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+#include <esp_arduino_version.h>
+#else
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPClient.h>
+#endif
 #include <WiFiClient.h>
 #include <WiFiManager.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <SPI.h>
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
+
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+static_assert(REG_SPI_BASE(SPI2_HOST) == DR_REG_SPI2_BASE,
+              "ESP32-C3 SPI2 register mapping is incompatible with TFT_eSPI");
+static_assert(TFT_SCLK == 3 && TFT_MOSI == 5 && TFT_MISO == 5 && TFT_DC == 2 && TFT_RST == 6 &&
+                  TFT_BL == 1 && TFT_CS == -1,
+              "ESP32-C3 display pins no longer match the recovered factory firmware");
+#endif
 
 #include "config.h"
 #include "img/claude_sprite.h"
@@ -23,7 +39,11 @@
 #include "img/codex_logo.h"
 
 TFT_eSPI tft = TFT_eSPI();
+#if defined(ESP32)
+WebServer webServer(80);
+#else
 ESP8266WebServer webServer(80);
+#endif
 
 // ---------- custom sprite storage (LittleFS) ----------
 // Custom uploads replace the compiled-in default animation without needing a
@@ -175,10 +195,22 @@ bool webServerStarted = false; // deferred: port 80 clashes with the portal
 
 int brightness = BRIGHTNESS_DEFAULT; // 0-100
 
+#if defined(ESP32) && ESP_ARDUINO_VERSION_MAJOR < 3
+const int BACKLIGHT_PWM_CHANNEL = 0;
+#endif
+
 void applyBrightness() {
-  // analogWriteRange(100) is set in setup(), so the duty value is just the
-  // inverted percentage (active LOW: 0 duty = always LOW = full on).
+  // Backlight is active LOW: zero duty means fully on.
+#if defined(ESP32)
+  uint32_t duty = (uint32_t)(100 - brightness) * 255 / 100;
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(TFT_BL, duty);
+#else
+  ledcWrite(BACKLIGHT_PWM_CHANNEL, duty);
+#endif
+#else
   analogWrite(TFT_BL, 100 - brightness);
+#endif
 }
 
 void loadBrightness() {
@@ -1743,16 +1775,33 @@ void setupWebServer() {
 void setup() {
   Serial.setRxBufferSize(2048); // a serial #STATUS frame (~600B) must survive a slow draw
   Serial.begin(115200);
+#if defined(ESP32)
+  LittleFS.begin(true); // format only when a fresh/mismatched partition cannot mount
+#else
   LittleFS.begin();
+#endif
   loadBridgeHost();
   loadBrightness();
   loadCustomSpriteState();
 
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  Serial.printf("[display] ST7789_2 SCLK=%d MOSI=%d MISO=%d CS=%d DC=%d RST=%d BL=%d\n", TFT_SCLK,
+                TFT_MOSI, TFT_MISO, TFT_CS, TFT_DC, TFT_RST, TFT_BL);
+#endif
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
+#if defined(ESP32)
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(TFT_BL, BRIGHTNESS_PWM_FREQ, 8);
+#else
+  ledcSetup(BACKLIGHT_PWM_CHANNEL, BRIGHTNESS_PWM_FREQ, 8);
+  ledcAttachPin(TFT_BL, BACKLIGHT_PWM_CHANNEL);
+#endif
+#else
   analogWriteFreq(BRIGHTNESS_PWM_FREQ);
   analogWriteRange(100); // duty maps 1:1 to a 0-100 percentage
+#endif
   applyBrightness();
 
   setupWiFi();

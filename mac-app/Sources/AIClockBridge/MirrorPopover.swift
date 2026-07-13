@@ -116,8 +116,8 @@ final class MirrorView: NSView {
     var musicPlaying = false
     var musicCover: CGImage?
 
-    private static let claudeLogo = Bundle.module.image(forResource: "claude-logo")
-    private static let codexLogo = Bundle.module.image(forResource: "codex-logo")
+    private static let claudeLogo = Bundle.aiClockResources.image(forResource: "claude-logo")
+    private static let codexLogo = Bundle.aiClockResources.image(forResource: "codex-logo")
 
     override var isFlipped: Bool { true } // draw in the panel's top-left origin
 

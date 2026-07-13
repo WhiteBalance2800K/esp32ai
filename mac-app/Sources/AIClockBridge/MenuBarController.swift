@@ -38,7 +38,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// dot). Full-color, so NOT a template image — it keeps its colors in
     /// both light and dark menu bars.
     private static func retroMacIcon() -> NSImage {
-        guard let img = Bundle.module.image(forResource: "happy-mac") else {
+        guard let img = Bundle.aiClockResources.image(forResource: "happy-mac") else {
             return NSImage(size: NSSize(width: 18, height: 18))
         }
         img.size = NSSize(width: 18, height: 18)
