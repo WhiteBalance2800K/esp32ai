@@ -38,7 +38,7 @@ if CommandLine.arguments.count >= 4, CommandLine.arguments[1] == "--preview-mark
 }
 
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "--status-json" {
-    FileHandle.standardOutput.write(StatusService().snapshot().jsonData())
+    FileHandle.standardOutput.write(StatusService().snapshot(waitForRefresh: true).jsonData())
     FileHandle.standardOutput.write(Data("\n".utf8))
     exit(0)
 }
@@ -125,6 +125,7 @@ let server = HTTPServer(port: port, routes: [
 ], binaryRoutes: [
     "/music/cover.raw": { nowPlaying.coverRGB565 },
     "/music/text.raw": { nowPlaying.textRGB565 },
+    "/btc/frame.rle": { market.packedFrameEnvelope },
     "/btc/frame.raw": { market.frameEnvelope },
 ], postRoutes: [
     // Claude Code / Codex hooks push lifecycle events here (see README §7):

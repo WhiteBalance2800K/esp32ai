@@ -152,10 +152,11 @@ bool musicHasArtwork = false;
 bool musicChromeDrawn = false;
 unsigned long lastMusicPollMs = 0;
 
-// ---------- BTC/USD full-frame mode ----------
-// The bridge rotates the selected market every 10 seconds; poll at the same
-// cadence so the device never skips a favorite.
-const unsigned long BTC_POLL_INTERVAL_MS = 10000;
+// ---------- Market full-frame mode ----------
+// Version JSON is tiny, so check once per second. The bridge's configurable
+// rotation timer is intentionally independent; matching two 10-second clocks
+// caused up to 10 seconds of phase delay after every rotation.
+const unsigned long BTC_POLL_INTERVAL_MS = 1000;
 unsigned long lastBtcPollMs = 0;
 const size_t BTC_FRAME_HEADER_BYTES = 8; // uint64 big-endian version
 const int BTC_FRAME_CHUNK_ROWS = 4;      // 4 rows = 1920 bytes per network read
@@ -164,7 +165,17 @@ const unsigned long BTC_FRAME_HTTP_TIMEOUT_MS = 2500;
 const unsigned long BTC_FRAME_READ_TIMEOUT_MS = 1200;
 const unsigned long BTC_FRAME_TOTAL_TIMEOUT_MS = 5000;
 uint64_t lastBtcFrameVersion = 0;
+String lastBtcFrameSession;
 uint16_t btcChunkPixels[SCREEN_W * BTC_FRAME_CHUNK_ROWS];
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+const size_t BTC_PACKED_HEADER_BYTES = 20; // MKT1 + version + dimensions + CRC32
+const size_t BTC_PACKED_MAX_BYTES = 32 * 1024;
+const unsigned long BTC_PACKED_TOTAL_TIMEOUT_MS = 4000;
+const unsigned long BTC_RAW_FALLBACK_INTERVAL_MS = 5000;
+uint8_t btcPackedFrame[BTC_PACKED_MAX_BYTES];
+uint8_t btcPackedFailureCount = 0;
+unsigned long lastBtcRawFallbackMs = 0;
+#endif
 
 // ---------- Fast/Priority task ignition ----------
 bool ludicrousActive = false;
@@ -1186,7 +1197,7 @@ bool readBtcExact(WiFiClient *stream, uint8_t *dst, size_t length, unsigned long
   return true;
 }
 
-bool pollBtcFrame(uint64_t expectedVersion) {
+bool pollBtcRawFrame(uint64_t expectedVersion) {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
   WiFiClient client;
   client.setTimeout(BTC_FRAME_READ_TIMEOUT_MS);
@@ -1211,7 +1222,9 @@ bool pollBtcFrame(uint64_t expectedVersion) {
   }
   uint64_t version = 0;
   for (size_t i = 0; i < sizeof(header); i++) version = (version << 8) | header[i];
-  if (version != expectedVersion || version <= lastBtcFrameVersion) {
+  // A refresh can land between /version and /frame.raw. A newer frame is
+  // valid; rejecting it used to add another full polling interval.
+  if (version < expectedVersion || version <= lastBtcFrameVersion) {
     Serial.printf("[btc] skip frame version=%llu expected=%llu last=%llu\n",
                   (unsigned long long)version, (unsigned long long)expectedVersion,
                   (unsigned long long)lastBtcFrameVersion);
@@ -1246,6 +1259,154 @@ bool pollBtcFrame(uint64_t expectedVersion) {
   return ok;
 }
 
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+enum BtcPackedResult { BTC_PACKED_OK, BTC_PACKED_UNAVAILABLE, BTC_PACKED_FAILED };
+
+uint32_t marketCrc32(const uint8_t *data, size_t length) {
+  uint32_t crc = 0xFFFFFFFF;
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= data[i];
+    for (int bit = 0; bit < 8; ++bit) {
+      crc = (crc >> 1) ^ ((crc & 1U) ? 0xEDB88320U : 0U);
+    }
+  }
+  return ~crc;
+}
+
+uint64_t marketReadU64BE(const uint8_t *data) {
+  uint64_t value = 0;
+  for (int i = 0; i < 8; ++i) value = (value << 8) | data[i];
+  return value;
+}
+
+uint32_t marketReadU32BE(const uint8_t *data) {
+  return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
+         ((uint32_t)data[2] << 8) | data[3];
+}
+
+// Validate the complete PackBits payload before touching the TFT. This is the
+// atomicity boundary: a short read, corrupt run or wrong pixel count leaves
+// the previous market screen completely intact.
+bool validateBtcPackedFrame(size_t frameBytes, uint64_t expectedVersion,
+                            uint64_t &versionOut) {
+  if (frameBytes < BTC_PACKED_HEADER_BYTES ||
+      memcmp(btcPackedFrame, "MKT1", 4) != 0) return false;
+  const uint16_t width = ((uint16_t)btcPackedFrame[12] << 8) | btcPackedFrame[13];
+  const uint16_t height = ((uint16_t)btcPackedFrame[14] << 8) | btcPackedFrame[15];
+  if (width != SCREEN_W || height != SCREEN_H) return false;
+
+  const uint64_t version = marketReadU64BE(btcPackedFrame + 4);
+  if (version < expectedVersion || version <= lastBtcFrameVersion) return false;
+  const uint8_t *payload = btcPackedFrame + BTC_PACKED_HEADER_BYTES;
+  const size_t payloadBytes = frameBytes - BTC_PACKED_HEADER_BYTES;
+  if (marketCrc32(payload, payloadBytes) != marketReadU32BE(btcPackedFrame + 16)) return false;
+
+  size_t cursor = 0;
+  size_t pixels = 0;
+  while (cursor < payloadBytes) {
+    const uint8_t control = payload[cursor++];
+    const size_t count = (control & 0x7F) + 1;
+    const size_t encodedBytes = (control & 0x80) ? 2 : count * 2;
+    if (cursor + encodedBytes > payloadBytes || pixels + count > SCREEN_W * SCREEN_H) return false;
+    cursor += encodedBytes;
+    pixels += count;
+  }
+  if (cursor != payloadBytes || pixels != SCREEN_W * SCREEN_H) return false;
+  versionOut = version;
+  return true;
+}
+
+void drawBtcPackedFrame(size_t frameBytes) {
+  const uint8_t *payload = btcPackedFrame + BTC_PACKED_HEADER_BYTES;
+  const size_t payloadBytes = frameBytes - BTC_PACKED_HEADER_BYTES;
+  uint8_t *chunkBytes = reinterpret_cast<uint8_t *>(btcChunkPixels);
+  const size_t chunkCapacity = SCREEN_W * BTC_FRAME_CHUNK_ROWS;
+  size_t chunkPixels = 0;
+  size_t cursor = 0;
+  int drawY = 0;
+
+  tft.startWrite();
+  while (cursor < payloadBytes) {
+    const uint8_t control = payload[cursor++];
+    const size_t count = (control & 0x7F) + 1;
+    if (control & 0x80) {
+      const uint8_t high = payload[cursor++];
+      const uint8_t low = payload[cursor++];
+      for (size_t i = 0; i < count; ++i) {
+        // Preserve the existing RGB565 wire byte order. The C3 is little
+        // endian and this firmware intentionally leaves setSwapBytes off.
+        chunkBytes[chunkPixels * 2] = high;
+        chunkBytes[chunkPixels * 2 + 1] = low;
+        if (++chunkPixels == chunkCapacity) {
+          tft.pushImage(0, drawY, SCREEN_W, BTC_FRAME_CHUNK_ROWS, btcChunkPixels);
+          drawY += BTC_FRAME_CHUNK_ROWS;
+          chunkPixels = 0;
+        }
+      }
+    } else {
+      for (size_t i = 0; i < count; ++i) {
+        chunkBytes[chunkPixels * 2] = payload[cursor++];
+        chunkBytes[chunkPixels * 2 + 1] = payload[cursor++];
+        if (++chunkPixels == chunkCapacity) {
+          tft.pushImage(0, drawY, SCREEN_W, BTC_FRAME_CHUNK_ROWS, btcChunkPixels);
+          drawY += BTC_FRAME_CHUNK_ROWS;
+          chunkPixels = 0;
+        }
+      }
+    }
+  }
+  tft.endWrite();
+}
+
+BtcPackedResult pollBtcPackedFrame(uint64_t expectedVersion) {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return BTC_PACKED_FAILED;
+  const unsigned long startedMs = millis();
+  WiFiClient client;
+  client.setTimeout(BTC_FRAME_READ_TIMEOUT_MS);
+  HTTPClient http;
+  String url = "http://" + bridgeHost + "/btc/frame.rle";
+  http.setTimeout(BTC_FRAME_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, url)) return BTC_PACKED_FAILED;
+  const int code = http.GET();
+  if (code == HTTP_CODE_NOT_FOUND) {
+    http.end();
+    return BTC_PACKED_UNAVAILABLE;
+  }
+  const int frameBytes = http.getSize();
+  if (code != HTTP_CODE_OK || frameBytes < (int)BTC_PACKED_HEADER_BYTES ||
+      frameBytes > (int)BTC_PACKED_MAX_BYTES) {
+    Serial.printf("[btc] packed GET -> %d size=%d max=%u\n", code, frameBytes,
+                  (unsigned)BTC_PACKED_MAX_BYTES);
+    http.end();
+    return BTC_PACKED_FAILED;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  const bool received = readBtcExact(stream, btcPackedFrame, (size_t)frameBytes,
+                                     BTC_PACKED_TOTAL_TIMEOUT_MS);
+  http.end();
+  if (!received) {
+    Serial.printf("[btc] packed frame timeout bytes=%d\n", frameBytes);
+    return BTC_PACKED_FAILED;
+  }
+
+  uint64_t version = 0;
+  if (!validateBtcPackedFrame((size_t)frameBytes, expectedVersion, version)) {
+    Serial.printf("[btc] packed frame validation failed size=%d expected=%llu last=%llu\n",
+                  frameBytes, (unsigned long long)expectedVersion,
+                  (unsigned long long)lastBtcFrameVersion);
+    return BTC_PACKED_FAILED;
+  }
+  const unsigned long downloadedMs = millis();
+  drawBtcPackedFrame((size_t)frameBytes);
+  lastBtcFrameVersion = version;
+  Serial.printf("[btc] packed frame applied version=%llu bytes=%d download=%lums draw=%lums heap=%u min=%u\n",
+                (unsigned long long)version, frameBytes, downloadedMs - startedMs,
+                millis() - downloadedMs, ESP.getFreeHeap(), ESP.getMinFreeHeap());
+  return BTC_PACKED_OK;
+}
+#endif
+
 void pollBtc() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
@@ -1266,9 +1427,55 @@ void pollBtc() {
     Serial.println("[btc] version JSON parse failed");
     return;
   }
+  const char *session = doc["session"] | "";
+  if (session[0] != '\0' && lastBtcFrameSession != session) {
+    Serial.printf("[btc] bridge frame session changed: %s\n", session);
+    lastBtcFrameSession = session;
+    lastBtcFrameVersion = 0;
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    btcPackedFailureCount = 0;
+    lastBtcRawFallbackMs = 0;
+#endif
+  }
   uint64_t version = doc["version"] | (uint64_t)0;
   if (version == 0 || version <= lastBtcFrameVersion) return;
-  pollBtcFrame(version);
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  const char *codec = doc["codec"] | "";
+  const size_t packedBytes = doc["packed_bytes"] | (size_t)0;
+  // Negotiate the compact route from /version instead of assuming every
+  // bridge revision and every future renderer fits this fixed C3 buffer.
+  // Older/unknown/oversized frames retain the raw compatibility path.
+  if (strcmp(codec, "rgb565-packbits-v1") == 0 &&
+      packedBytes >= BTC_PACKED_HEADER_BYTES && packedBytes <= BTC_PACKED_MAX_BYTES) {
+    const BtcPackedResult result = pollBtcPackedFrame(version);
+    if (result == BTC_PACKED_OK) {
+      btcPackedFailureCount = 0;
+    } else if (result == BTC_PACKED_UNAVAILABLE) {
+      btcPackedFailureCount = 0;
+      pollBtcRawFrame(version);
+    } else {
+      if (btcPackedFailureCount < 255) ++btcPackedFailureCount;
+      // A corrupt or incompatible compact route must not freeze the market
+      // page forever. Retry once, then periodically use the legacy route
+      // while continuing to probe the compact route every second.
+      if (btcPackedFailureCount >= 2 &&
+          (lastBtcRawFallbackMs == 0 ||
+           millis() - lastBtcRawFallbackMs >= BTC_RAW_FALLBACK_INTERVAL_MS)) {
+        lastBtcRawFallbackMs = millis();
+        Serial.printf("[btc] packed failed %u times; trying raw fallback\n",
+                      btcPackedFailureCount);
+        if (pollBtcRawFrame(version)) btcPackedFailureCount = 0;
+      }
+    }
+  } else {
+    btcPackedFailureCount = 0;
+    Serial.printf("[btc] raw fallback codec=%s packed=%u\n", codec,
+                  (unsigned)packedBytes);
+    pollBtcRawFrame(version);
+  }
+#else
+  pollBtcRawFrame(version);
+#endif
 }
 
 void drawLudicrousFrame(float p) {
@@ -1432,6 +1639,11 @@ void maintainWiFi() {
 // screen (wired mode for APs with client isolation).
 void setupWiFi() {
   WiFi.setAutoReconnect(true);
+#if defined(ESP32)
+  // This clock is USB powered. Disabling modem sleep removes DTIM receive
+  // stalls while a compressed market frame is arriving.
+  WiFi.setSleep(false);
+#endif
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setConfigPortalBlocking(false);
 
