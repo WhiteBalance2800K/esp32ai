@@ -8,7 +8,7 @@
 - **工作状态**（working/idle/offline）：本地会话日志的新旧程度
   - `~/.claude/projects/**/*.jsonl`（Claude Code 会话记录）
   - `~/.codex/sessions/**/*.jsonl`（Codex CLI 会话记录）
-- **真实额度**（5h / 周窗口用量百分比 + 重置时间）：复用两个 CLI 已经存在本机的
+- **真实额度**（Claude 5h / 周窗口，Codex 仅周窗口）：复用两个 CLI 已经存在本机的
   OAuth 登录凭据，直接调各自官方用量接口（做法与
   [CodexBar](https://github.com/steipete/CodexBar) 相同，token 只发给各自官方 API）：
   - Claude：Keychain 里的 `Claude Code-credentials` → `api.anthropic.com/api/oauth/usage`
@@ -16,7 +16,7 @@
 
 架构：`mac-app/` 是一个 **Swift 原生菜单栏 app**（Windows 用户用 `windows-app/`，
 功能一致的 C# 托盘移植版），读日志、开一个本地 HTTP 服务；
-`firmware/` 是 ESP8266 固件，联网后每 15 秒轮询这个服务，把时间 + 状态画到 240x240
+`firmware/` 是 ESP32-C3 / ESP8266 固件，联网后每 2 秒轮询这个服务，把状态画到 240x240
 ST7789 彩屏上。桌宠动画（GIF）的上传和解码**全部在 ESP8266 板子上完成**，换形象不再需要
 电脑参与（详见第 4 节）。
 
@@ -49,14 +49,15 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   `GET /sprite/<app>/raw` 拉取（设备正在用什么就播什么，自定义/内置都一样），
   working 时同步播放走路循环，随设备 2s/6s 切换同步换角色；底部附
   自动/Claude/Codex 快速切换。
-- **右键点击** → 控制菜单：完整额度（5h/周 用量 + 重置倒计时）+ 设备遥控：
+- **右键点击** → 控制菜单：Claude 5h/周、Codex Weekly 用量与重置倒计时 + 设备遥控：
 
 - **自动查找并配对设备**：一般不用手动——设备本来就在轮询本机的 `/status`，
   bridge 记下来访 IP 即完成发现（零扫描）；地址为空时自动配对，设备 DHCP 换了 IP
   也会自愈。菜单项走完整流程：最近来访 IP → 已配置地址复验 → 子网 /24 扫描兜底
   （覆盖"刚配完 WiFi、还没设过桥接"的全新设备）。
 - **设置设备地址…**：手动填时钟的 IP（开机时屏幕会显示；有自动配对后基本用不上）
-- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex
+- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 行情
+- **行情标的**：上证、恒生、SPX、NDX、KOSPI 等预设，或输入 sh/sz/bj/hk/us/kr 代码
 - **音乐播放**：显示 Mac 当前播放的专辑封面、歌曲、歌手和进度
 - **更换桌宠动画…**：内置 [petdex.dev](https://petdex.dev) 画廊（3300+ 开源桌宠），
   搜索 → 选动画（待机/跑步/挥手…9 种）→ 预览 → 一键上传到设备
@@ -74,8 +75,8 @@ curl -s http://localhost:8765/status | python3 -m json.tool
 ```json
 {
   "claude": {"status": "working", "tokens_today": 4868001, "session_min": 26, "session_window_min": 300},
-  "codex":  {"status": "offline", "tokens_today": 61471, "primary_pct": 1.0, "primary_window_min": 300,
-             "primary_reset_min": 0, "weekly_pct": 2.0, "weekly_window_min": 10080, "weekly_reset_min": 8729}
+  "codex":  {"status": "offline", "tokens_today": 61471,
+             "weekly_pct": 2.0, "weekly_window_min": 10080, "weekly_reset_min": 8729}
 }
 ```
 
@@ -88,7 +89,7 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
 ### 数据来源与局限
 
 - **额度（两家都是真实值）**：app 每 2 分钟调一次官方用量接口（见开头），拿到
-  5h / 周窗口的已用百分比和重置时间，合并进 `/status` 下发给设备。接口 429 限流时
+  Claude 5h/周窗口与 Codex 周窗口的已用百分比和重置时间，合并进 `/status` 下发给设备。接口 429 限流时
   自动退避 5 分钟并沿用上一次的数值。
 - Claude 的 OAuth token 存在 Keychain，app 通过 `security` CLI 读取，第一次运行
   macOS 可能弹一次授权框（选"始终允许"即可）；`~/.claude/.credentials.json` 存在时
@@ -157,19 +158,24 @@ pio device monitor -e nodemcuv2 -b 115200
 
 - **只有一方在工作** → 固定显示正在工作的那个
 - **两方都在工作** → 每 2 秒交替
-- **都空闲** → 每 6 秒慢速交替
+- **都空闲** → 保持最近有真实活动的一方，不再轮播到长期没对话的 CLI
 - Mac 菜单栏里也可以强制固定显示某一方（`POST /api/display`），固定后忽略上述规则
 
 视觉元素：
 
-- 屏幕中央：对应角色的大幅像素动画（Claude = 跑步的 Dario，Codex = 戴耳机的宠物），
+- 屏幕右上角：对应角色的像素动画（Claude = 跑步的 Dario，Codex = 戴耳机的宠物），
   仅在该角色 `working` 时播放动画，否则停在静止帧。
-- 屏幕四周一圈方形进度环：环的填充长度 = 用量百分比（Claude 用 5 小时滚动窗口已用
-  比例近似，Codex 用真实的 5h `primary_pct`）；环的颜色/动画参考
+- 角色下方显示本机自然日的 token 与估算成本（`TODAY` 行放大显示，不再附加 `tok`）。统计窗口固定为本机时区 `00:01 <= t < 次日 00:00`；
+  价格优先读取 LiteLLM 公共模型目录并落盘缓存，离线时使用内置常用模型价格。遇到未知模型
+  仍显示 token，金额显示 `$?`，避免把不完整金额误报为准确值。
+- Claude `usage.speed=fast` 或 Codex `service_tier=fast|priority` 时，每个 `user` / `task_started`
+  任务序号只触发一次约 2.4 秒的黑银红 Ludicrous 动画。设备首次看到旧序号只建基线，不补播；
+  固定网速、音乐或 BTC 页不会被动画打断。
+- 屏幕四周一圈方形进度环：环的填充长度 = 用量百分比（Claude 用 5 小时滚动窗口，
+  Codex 只用真实的 Weekly `weekly_pct`）；环的颜色参考
   [vibecoding-signal-light](https://github.com/starlight36/vibecoding-signal-light)
   的红绿灯设计：
-  - **常亮绿** = 空闲/离线，不需要关注
-  - **绿→黄→红缓慢循环** = 正在工作
+  - **Claude 常亮绿**；Codex Weekly `< 50%` 为绿、`>= 50%` 为黄、`>= 75%` 为红
   - **红色闪烁**（最高优先级，覆盖其他状态）= 桥接服务连不上或数据过期（超过
     2 个轮询周期没更新），需要马上看一眼
 - **整圈边框红色闪烁 = 需要你确认操作**：Claude / Codex 弹出权限/审批选择时（Claude
@@ -197,7 +203,7 @@ pio device monitor -e nodemcuv2 -b 115200
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music` 切换屏幕显示（net=网速曲线页，music=音乐播放页）|
+| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music\|btc` 切换屏幕显示（`btc` 为行情兼容名） |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
@@ -230,7 +236,7 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
 
 **AUTO 模式下自动切换**：Mac 一有音频在播放（放歌、看视频都算），设备自动切到音乐
 页；停止后自动切回桌宠/额度页。机制：`/status` 带 `music_playing` 字段（状态轮询
-5 秒一次 → 开始播放约 5 秒内切入），音乐页显示时靠 `/music` 的 2 秒轮询快速检测停止
+2 秒一次），音乐页显示时靠 `/music` 的 2 秒轮询快速检测停止
 （约 2 秒切回）。仅 AUTO 生效；手动固定某模式（含固定「音乐播放」）时不受影响。
 `/api/info` 里 `mode` 是配置的模式、`effective` 是当前实际渲染的模式，Mac 镜像按
 `effective` 跟随。
@@ -246,7 +252,23 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
 设备每 2 秒刷新一次音乐信息；封面只有在版本号变化时重新拉取。Mac 弹窗镜像同样显示
 音乐页，方便不用看设备也能确认布局。
 
-## 7. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
+## 7. 多市场行情页
+
+桥接端每 20 秒更新当前行情数据，并每 10 秒在最多 15 个收藏标的之间轮换，支持 A 股、港股、
+美股、韩股、BTC/ETH 以及对应的主要指数。菜单内置上证、NDX、SPX、AAPL、NVDA 等常用项；
+“搜索/添加行情…”的“显示并收藏”按钮可把代码加入收藏（上限 15 个）。腾讯、东方财富和 Naver
+是默认数据源，不需要额外商业 API 账号；数据源按市场隔离，某个接口失效时保留最后成功帧并标记
+`STALE`。
+
+菜单中可选 1m、5m、60m，桥接端保留最近 36 根数据并渲染成 240x240 RGB565 完整帧：
+
+- `GET /btc`：兼容路径，返回当前标的、周期、价格、涨跌、数据源、更新时间和蜡烛数组
+- `GET /btc/frame.raw`：兼容旧固件的 240x240 RGB565 大端完整帧
+
+设备只负责显示完整帧，因此后续调整标的、配色、文字和布局只需更新桥接 App。A 股/韩股
+优先画真实 OHLC；美股无分钟 OHLC 时画真实分时线，港股盘前无分钟数据时回退到日线。
+
+## 8. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
 
 除了日志 mtime 轮询（保留为兜底），bridge 还接收两个 CLI 官方 hooks 的事件推送，
 状态切换从"最多迟滞 20 秒"变成"毫秒级"：
@@ -283,8 +305,8 @@ ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedG
 **注意事项 / 局限**：
 
 - GIF 太大（尺寸很大、颜色/帧很多）可能因内存不足解码失败，页面会报错，换小一点的即可。
-- 目标插槽尺寸固定：Claude 111x120、Codex 120x120，板上会最近邻缩放匹配（质量不如
-  PIL 的 LANCZOS，像素风 GIF 通常没问题）。
+- 目标插槽的源数据尺寸仍固定为 Claude 111x120、Codex 120x120；设备显示时统一按 85% 最近邻
+  缩放（质量不如 PIL 的 LANCZOS，像素风 GIF 通常没问题），因此无需重新上传现有桌宠素材。
 - 最多取 GIF 的**前 8 帧**（没有整体帧数信息，就不做均匀抽帧了）。
 - disposal method 2（"恢复到背景色"）没有单独区分，未覆盖像素保留上一帧而不是清空；
   对循环角色动画来说无所谓。

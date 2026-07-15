@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Build the ESP32-C3 target and create the merged ESP Web Tools image."""
+"""Build the ESP32-C3 target and create an ESP Web Tools manifest.
+
+The manifest deliberately references the four flash segments separately.  A
+single merged image contains 0xFF padding across the NVS partition at 0x9000;
+writing that image from offset 0 would therefore destroy saved Wi-Fi
+credentials even when the Web Flasher's erase checkbox is off.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +31,10 @@ BOOTLOADER_OFFSET = 0x0
 PARTITIONS_OFFSET = 0x8000
 BOOT_APP0_OFFSET = 0xE000
 APPLICATION_OFFSET = 0x10000
+# no_ota.csv reserves 0x9000..0xE000 for ESP32 NVS.  Keep this explicit in
+# the build guard so a future manifest change cannot silently overwrite Wi-Fi.
+NVS_OFFSET = 0x9000
+NVS_SIZE = 0x5000
 FLASH_SIZE_BYTES = 4 * 1024 * 1024
 
 
@@ -82,6 +92,7 @@ def validate_build_contract() -> None:
 def verify_merged_image(image: Path, required: dict[str, Path], boot_app0: Path, version: str) -> None:
     merged = image.read_bytes()
     checks = (
+        (BOOTLOADER_OFFSET, required["bootloader"]),
         (PARTITIONS_OFFSET, required["partitions"]),
         (BOOT_APP0_OFFSET, boot_app0),
         (APPLICATION_OFFSET, required["application"]),
@@ -108,7 +119,7 @@ def verify_merged_image(image: Path, required: dict[str, Path], boot_app0: Path,
             raise SystemExit(f"unexpected merged image header: missing {expected}")
 
 
-def write_manifest(path: Path, version: str, image_name: str) -> None:
+def write_manifest(path: Path, version: str, parts: list[dict[str, int | str]]) -> None:
     manifest = {
         "name": "AI Clock ESP32-C3",
         "version": version,
@@ -117,11 +128,41 @@ def write_manifest(path: Path, version: str, image_name: str) -> None:
         "builds": [
             {
                 "chipFamily": "ESP32-C3",
-                "parts": [{"path": f"firmware/{image_name}", "offset": 0}],
+                "parts": parts,
             }
         ],
     }
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_immutable_part(source: Path, version: str, label: str) -> Path:
+    """Copy a build segment to its content-addressed Web Flasher path."""
+
+    data = source.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    output = OUTPUT_DIR / f"esp32c3-ai-clock-{version}-{label}-{digest[:12]}.bin"
+    if output.exists():
+        if output.read_bytes() != data:
+            raise SystemExit(f"content hash collision for immutable Web part: {output.name}")
+        return output
+
+    temporary = OUTPUT_DIR / f".{output.name}.tmp"
+    temporary.write_bytes(data)
+    temporary.replace(output)
+    return output
+
+
+def verify_user_data_gap(segments: tuple[tuple[str, int, Path], ...]) -> None:
+    """Ensure no Web Flasher segment intersects the ESP32 NVS partition."""
+
+    nvs_end = NVS_OFFSET + NVS_SIZE
+    for label, offset, source in segments:
+        segment_end = offset + source.stat().st_size
+        if offset < nvs_end and segment_end > NVS_OFFSET:
+            raise SystemExit(
+                f"Web part {label} overlaps NVS ({offset:#x}..{segment_end:#x}); "
+                "Wi-Fi credentials would not be preserved"
+            )
 
 
 def main() -> None:
@@ -164,24 +205,39 @@ def main() -> None:
             str(required["application"]),
         )
         verify_merged_image(TEMP_OUTPUT, required, boot_app0, version)
-        digest = hashlib.sha256(TEMP_OUTPUT.read_bytes()).hexdigest()
-        output = OUTPUT_DIR / f"esp32c3-ai-clock-{version}-{digest[:12]}.bin"
-        write_manifest(TEMP_MANIFEST, version, output.name)
+
+        # Keep the immutable files separate in the manifest.  This makes a
+        # normal update touch only bootloader/partition/app segments and leave
+        # NVS (Wi-Fi credentials) and LittleFS (user assets) untouched.
+        segments = (
+            ("bootloader", BOOTLOADER_OFFSET, required["bootloader"]),
+            ("partitions", PARTITIONS_OFFSET, required["partitions"]),
+            ("boot_app0", BOOT_APP0_OFFSET, boot_app0),
+            ("application", APPLICATION_OFFSET, required["application"]),
+        )
+        verify_user_data_gap(segments)
+        outputs = [
+            (label, offset, write_immutable_part(source, version, label))
+            for label, offset, source in segments
+        ]
+        manifest_parts = [
+            {"path": f"firmware/{output.name}", "offset": offset}
+            for _label, offset, output in outputs
+        ]
+        write_manifest(TEMP_MANIFEST, version, manifest_parts)
         generated_manifest = json.loads(TEMP_MANIFEST.read_text())
         if generated_manifest["version"] != version:
             raise SystemExit("generated manifest version mismatch")
-        if output.exists():
-            if output.read_bytes() != TEMP_OUTPUT.read_bytes():
-                raise SystemExit("content hash collision for immutable Web image")
-        else:
-            TEMP_OUTPUT.replace(output)
+        if generated_manifest["builds"][0]["parts"] != manifest_parts:
+            raise SystemExit("generated manifest parts mismatch")
         # The final mutable step is only this pointer switch. If it fails, the
         # old manifest still references its old immutable, verified image.
         TEMP_MANIFEST.replace(MANIFEST)
     finally:
         TEMP_OUTPUT.unlink(missing_ok=True)
         TEMP_MANIFEST.unlink(missing_ok=True)
-    print(f"Web image: {output} ({output.stat().st_size} bytes)")
+    for label, _offset, output in outputs:
+        print(f"Web part ({label}): {output} ({output.stat().st_size} bytes)")
     print(f"Manifest: {MANIFEST} (version {version})")
 
 
