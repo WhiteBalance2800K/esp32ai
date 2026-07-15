@@ -13,6 +13,7 @@ sealed class TrayAppContext : ApplicationContext
     readonly StatusService _service;
     readonly UsageFetcher _usage;
     readonly int _port;
+    readonly MarketMonitor _market;
     readonly MirrorForm _mirror;
     readonly ContextMenuStrip _menu = new();
 
@@ -20,14 +21,18 @@ sealed class TrayAppContext : ApplicationContext
     readonly ToolStripMenuItem _codexUsageItem = new("Codex …") { Enabled = false };
     readonly ToolStripMenuItem _deviceInfoItem = new("设备：未设置") { Enabled = false };
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
+    readonly ToolStripMenuItem _marketInstrumentMenu = new("行情标的");
+    readonly Dictionary<string, ToolStripMenuItem> _marketInstrumentItems = new();
+    readonly Dictionary<int, ToolStripMenuItem> _marketRefreshItems = new();
 
     public TrayAppContext(StatusService service, UsageFetcher usage, NetSpeedMonitor netMonitor,
-                          NowPlayingMonitor nowPlaying, int port)
+                          NowPlayingMonitor nowPlaying, MarketMonitor market, int port)
     {
         _service = service;
         _usage = usage;
         _port = port;
-        _mirror = new MirrorForm(service, netMonitor, nowPlaying);
+        _market = market;
+        _mirror = new MirrorForm(service, netMonitor, nowPlaying, market);
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -46,6 +51,8 @@ sealed class TrayAppContext : ApplicationContext
             _usage.Refresh();
             RefreshUsageLines();
             _ = RefreshDeviceSection();
+            RebuildMarketInstrumentMenu();
+            UpdateMarketMenuStates();
         };
         _usage.OnUpdate = RefreshUsageLines;
     }
@@ -79,7 +86,7 @@ sealed class TrayAppContext : ApplicationContext
         foreach (var (title, mode) in new[]
         {
             ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-            ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
+            ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"), ("行情", "btc"),
         })
         {
             var item = new ToolStripMenuItem(title);
@@ -88,6 +95,31 @@ sealed class TrayAppContext : ApplicationContext
             displayMenu.DropDownItems.Add(item);
         }
         _menu.Items.Add(displayMenu);
+
+        var intervalMenu = new ToolStripMenuItem("行情 K线周期");
+        foreach (var (title, interval) in new[]
+        {
+            ("1 分钟", MarketInterval.OneMinute), ("5 分钟", MarketInterval.FiveMinutes),
+            ("60 分钟", MarketInterval.OneHour),
+        })
+        {
+            var item = new ToolStripMenuItem(title) { Tag = interval };
+            item.Click += (_, _) => { _market.SetInterval(interval); UpdateMarketMenuStates(); };
+            intervalMenu.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(intervalMenu);
+
+        var refreshMenu = new ToolStripMenuItem("行情刷新间隔");
+        foreach (var seconds in new[] { 10, 30, 60, 120 })
+        {
+            var item = new ToolStripMenuItem($"{seconds} 秒");
+            item.Click += (_, _) => { _market.SetRefreshInterval(seconds); UpdateMarketMenuStates(); };
+            _marketRefreshItems[seconds] = item; refreshMenu.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(refreshMenu);
+        RebuildMarketInstrumentMenu();
+        _menu.Items.Add(_marketInstrumentMenu);
+        _menu.Items.Add(MakeItem("搜索/添加行情…", (_, _) => SearchMarket()));
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         _menu.Items.Add(MakeItem("更换桌宠动画…（petdex）", (_, _) => OpenPetPicker()));
@@ -129,15 +161,18 @@ sealed class TrayAppContext : ApplicationContext
 
     void RefreshUsageLines()
     {
-        _claudeUsageItem.Text = UsageLine("Claude", _usage.Claude, "7天");
-        _codexUsageItem.Text = UsageLine("Codex", _usage.Codex, "周");
+        var snap = _service.Snapshot();
+        _claudeUsageItem.Text = UsageLine("Claude", _usage.Claude, "7天", true)
+            + TodaySuffix(snap.Claude.TokensToday, snap.Claude.CostToday);
+        _codexUsageItem.Text = UsageLine("Codex", _usage.Codex, "周", false)
+            + TodaySuffix(snap.Codex.TokensToday, snap.Codex.CostToday);
     }
 
-    static string UsageLine(string name, ProviderUsage u, string weeklyLabel)
+    static string UsageLine(string name, ProviderUsage u, string weeklyLabel, bool showPrimary)
     {
-        if (u.Error != null && u.PrimaryPct == null) return $"{name}：{u.Error}";
+        if (u.Error != null && u.WeeklyPct == null && (!showPrimary || u.PrimaryPct == null)) return $"{name}：{u.Error}";
         var parts = new List<string>();
-        if (u.PrimaryPct.HasValue)
+        if (showPrimary && u.PrimaryPct.HasValue)
         {
             var s = $"5h {(int)u.PrimaryPct.Value}%";
             if (u.PrimaryResetMin.HasValue) s += $"（{FmtMin(u.PrimaryResetMin.Value)}后重置）";
@@ -151,6 +186,9 @@ sealed class TrayAppContext : ApplicationContext
         }
         return parts.Count == 0 ? $"{name}：额度未知" : $"{name}　" + string.Join("　", parts);
     }
+
+    static string TodaySuffix(int tokens, double? cost)
+        => $"　今日 {tokens:N0} tok ≈{(cost.HasValue ? $"${cost.Value:F2}" : "$?")}";
 
     static string FmtMin(int min)
     {
@@ -195,6 +233,7 @@ sealed class TrayAppContext : ApplicationContext
         };
         var showing = info.Mode == "net" ? "网速"
             : info.Mode == "music" ? "音乐"
+            : info.Mode == "btc" ? "行情"
             : (info.Showing == "claude" ? "Claude" : "Codex");
         _deviceInfoItem.Text =
             $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
@@ -257,6 +296,53 @@ sealed class TrayAppContext : ApplicationContext
         {
             Toast("切换失败", e.Message);
         }
+    }
+
+    void RebuildMarketInstrumentMenu()
+    {
+        _marketInstrumentMenu.DropDownItems.Clear();
+        _marketInstrumentItems.Clear();
+        foreach (var instrument in _market.Favorites)
+        {
+            var item = new ToolStripMenuItem(instrument.MenuTitle) { Tag = instrument.Id };
+            item.Click += (_, _) => { _market.SetInstrument(instrument); UpdateMarketMenuStates(); };
+            _marketInstrumentItems[instrument.Id] = item;
+            _marketInstrumentMenu.DropDownItems.Add(item);
+        }
+        UpdateMarketMenuStates();
+    }
+
+    void UpdateMarketMenuStates()
+    {
+        foreach (var pair in _marketInstrumentItems) pair.Value.Checked = pair.Key == _market.Instrument.Id;
+        foreach (var pair in _marketRefreshItems) pair.Value.Checked = pair.Key == _market.RefreshSeconds;
+        foreach (ToolStripItem parent in _menu.Items)
+        {
+            if (parent is not ToolStripMenuItem { Text: "行情 K线周期" } intervalMenu) continue;
+            foreach (ToolStripItem child in intervalMenu.DropDownItems)
+                if (child is ToolStripMenuItem item && item.Tag is MarketInterval interval)
+                    item.Checked = interval == _market.Interval;
+        }
+    }
+
+    void SearchMarket()
+    {
+        var input = InputDialog.Show("搜索/添加行情",
+            "输入 A股、港股、美股或韩股代码，例如 600519、hk00700、AAPL、kr005930",
+            "", "600519 / hk00700 / AAPL / kr005930");
+        if (input == null) return;
+        var instrument = MarketInstrument.Parse(input);
+        if (instrument == null)
+        {
+            Toast("无法识别", "请使用代码或带市场前缀的代码，例如 sh600519、hk00700、AAPL、kr005930。");
+            return;
+        }
+        var favorite = MessageBox.Show("是否同时收藏该标的？\n\n选择“否”将仅显示，不加入轮换列表。",
+            "显示行情", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+        if (favorite && !_market.AddFavorite(instrument))
+            Toast("收藏已满", "行情标的最多收藏 15 个；本次已仅显示该标的。");
+        _market.SetInstrument(instrument);
+        RebuildMarketInstrumentMenu();
     }
 
     void OpenPetPicker()

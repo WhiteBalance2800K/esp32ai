@@ -30,6 +30,9 @@ static class Program
         netMonitor.Start();
         var nowPlaying = new NowPlayingMonitor();
         nowPlaying.Start();
+        using var market = new MarketMonitor();
+        market.Start();
+        ModelPricing.Shared.Refresh();
         service.MusicPlayingProvider = () => nowPlaying.Snapshot.Playing;
 
         var server = new MiniHttpServer(Port,
@@ -39,11 +42,15 @@ static class Program
                 ["/status"] = () => service.Snapshot().ToJson(),
                 ["/net"] = () => netMonitor.ToJson(SystemStatsMonitor.Snapshot()),
                 ["/music"] = () => nowPlaying.ToJson(),
+                ["/btc"] = () => market.JsonData(),
+                ["/btc/version"] = () => market.FrameVersionJson,
             },
             binaryRoutes: new()
             {
                 ["/music/cover.raw"] = () => nowPlaying.CoverRgb565,
                 ["/music/text.raw"] = () => nowPlaying.TextRgb565,
+                ["/btc/frame.rle"] = () => market.PackedFrameEnvelope,
+                ["/btc/frame.raw"] = () => market.FrameEnvelope,
             },
             postRoutes: new()
             {
@@ -103,7 +110,7 @@ static class Program
             Console.Error.WriteLine($"[bridge] failed to bind port {Port}: {e.Message}");
         }
 
-        var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, Port);
+        var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, market, Port);
         usage.StartAutoRefresh();
         Application.Run(context);
     }

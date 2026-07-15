@@ -60,6 +60,7 @@ sealed class MiniHttpServer
     {
         using (client)
         {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             client.ReceiveTimeout = 10_000;
             client.SendTimeout = 10_000;
             NetworkStream stream;
@@ -80,7 +81,7 @@ sealed class MiniHttpServer
                 // read until end of headers
                 while (headerEnd < 0)
                 {
-                    int n = await stream.ReadAsync(chunk);
+                    int n = await stream.ReadAsync(chunk, cts.Token);
                     if (n <= 0) return;
                     buf.AddRange(chunk.AsSpan(0, n).ToArray());
                     headerEnd = FindHeaderEnd(buf);
@@ -105,7 +106,7 @@ sealed class MiniHttpServer
                 {
                     while (buf.Count - bodyStart < contentLength)
                     {
-                        int n = await stream.ReadAsync(chunk);
+                        int n = await stream.ReadAsync(chunk, cts.Token);
                         if (n <= 0) break;
                         buf.AddRange(chunk.AsSpan(0, n).ToArray());
                     }
@@ -114,7 +115,7 @@ sealed class MiniHttpServer
                 var requestBody = buf.GetRange(bodyStart, Math.Max(0, bodyEnd - bodyStart)).ToArray();
 
                 var response = BuildResponse(client, method, path, requestBody);
-                await stream.WriteAsync(response);
+                await stream.WriteAsync(response, cts.Token);
             }
             catch
             {

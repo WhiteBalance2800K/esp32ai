@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace AIClockBridge;
@@ -8,7 +9,7 @@ namespace AIClockBridge;
 //   Claude: %USERPROFILE%\.claude\.credentials.json, then GET
 //           https://api.anthropic.com/api/oauth/usage  (5h + 7d windows)
 //   Codex:  %USERPROFILE%\.codex\auth.json, then GET
-//           https://chatgpt.com/backend-api/wham/usage (5h + weekly windows)
+//           https://chatgpt.com/backend-api/wham/usage (the app shows weekly only)
 // Tokens never leave this machine except toward their own vendor's API.
 
 class ProviderUsage
@@ -84,7 +85,8 @@ sealed class UsageFetcher
 
     static ProviderUsage Merge(ProviderUsage old, ProviderUsage fresh)
     {
-        if (fresh.PrimaryPct == null && fresh.WeeklyPct == null && old.PrimaryPct != null)
+        if (fresh.PrimaryPct == null && fresh.WeeklyPct == null
+            && (old.PrimaryPct != null || old.WeeklyPct != null))
         {
             return new ProviderUsage
             {
@@ -121,9 +123,10 @@ sealed class UsageFetcher
         int code;
         try
         {
-            using var resp = await Http.SendAsync(req);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             code = (int)resp.StatusCode;
-            body = await resp.Content.ReadAsStringAsync();
+            body = Encoding.UTF8.GetString(await ReadLimited(resp.Content, 512 * 1024, cts.Token));
         }
         catch
         {
@@ -209,9 +212,10 @@ sealed class UsageFetcher
         int code;
         try
         {
-            using var resp = await Http.SendAsync(req);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             code = (int)resp.StatusCode;
-            body = await resp.Content.ReadAsStringAsync();
+            body = Encoding.UTF8.GetString(await ReadLimited(resp.Content, 512 * 1024, cts.Token));
         }
         catch
         {
@@ -233,16 +237,12 @@ sealed class UsageFetcher
                 return usage;
             }
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-            if (rateLimit.TryGetProperty("primary_window", out var w1))
+            var weekly = CodexWeeklyWindow(rateLimit);
+            if (weekly.HasValue)
             {
-                usage.PrimaryPct = NumberOrNull(w1, "used_percent");
-                var reset = NumberOrNull(w1, "reset_at");
-                if (reset.HasValue) usage.PrimaryResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
-            if (rateLimit.TryGetProperty("secondary_window", out var w2))
-            {
-                usage.WeeklyPct = NumberOrNull(w2, "used_percent");
-                var reset = NumberOrNull(w2, "reset_at");
+                usage.WeeklyPct = NumberOrNull(weekly.Value, "used_percent");
+                var reset = NumberOrNull(weekly.Value, "reset_at")
+                    ?? NumberOrNull(weekly.Value, "resets_at");
                 if (reset.HasValue) usage.WeeklyResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
             }
             usage.FetchedAt = DateTime.UtcNow;
@@ -280,6 +280,22 @@ sealed class UsageFetcher
         }
     }
 
+    static JsonElement? CodexWeeklyWindow(JsonElement limits)
+    {
+        var parsed = new List<(string Name, JsonElement Value, int? Minutes)>();
+        foreach (var name in new[] { "primary", "secondary", "primary_window", "secondary_window" })
+        {
+            if (!limits.TryGetProperty(name, out var value)
+                || !NumberOrNull(value, "used_percent").HasValue) continue;
+            parsed.Add((name, value, (int?)NumberOrNull(value, "window_minutes")));
+        }
+        var exact = parsed.FirstOrDefault(x => x.Minutes == 7 * 24 * 60);
+        if (exact.Value.ValueKind != JsonValueKind.Undefined) return exact.Value;
+        var secondary = parsed.FirstOrDefault(x => x.Name is "secondary" or "secondary_window");
+        if (secondary.Value.ValueKind != JsonValueKind.Undefined) return secondary.Value;
+        return parsed.Count == 1 && parsed[0].Minutes == null ? parsed[0].Value : null;
+    }
+
     /// auth.json without a top-level account_id keeps it inside the id_token
     /// JWT claims (https://api.openai.com/auth -> chatgpt_account_id).
     static string AccountIdFromJwt(string jwt)
@@ -311,6 +327,22 @@ sealed class UsageFetcher
             && v.ValueKind == JsonValueKind.Number)
             return v.GetDouble();
         return null;
+    }
+
+    static async Task<byte[]> ReadLimited(HttpContent content, int limit, CancellationToken token)
+    {
+        if (content.Headers.ContentLength > limit) throw new InvalidDataException("usage response too large");
+        await using var stream = await content.ReadAsStreamAsync(token);
+        using var output = new MemoryStream(Math.Min(limit, (int)(content.Headers.ContentLength ?? 4096)));
+        var buffer = new byte[16 * 1024];
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, token);
+            if (read == 0) break;
+            if (output.Length + read > limit) throw new InvalidDataException("usage response too large");
+            output.Write(buffer, 0, read);
+        }
+        return output.ToArray();
     }
 
     static string StringOrNull(JsonElement obj, string key)

@@ -26,6 +26,8 @@ sealed class MirrorControl : Control
     public bool FlashOn;
     public string Line1 = "5h -";
     public string Line2 = "Weekly -";
+    public string DailyLine = "TODAY 0  ~$0.00";
+    public int RingLevel; // 0 green, 1 yellow, 2 red
     public bool ShowingClaude = true;
     public bool DeviceOK;
     // net-mode mirror: same scrolling area-chart model as the firmware —
@@ -47,6 +49,9 @@ sealed class MirrorControl : Control
     public double MusicDuration;
     public bool MusicPlaying;
     public Bitmap MusicCover;
+    public bool MarketMode;
+    public Bitmap MarketFrame;
+    public double? LudicrousProgress;
 
     static readonly Image ClaudeLogo = LoadAsset("claude-logo.png");
     static readonly Image CodexLogo = LoadAsset("codex-logo.png");
@@ -104,6 +109,16 @@ sealed class MirrorControl : Control
             g.SetClip(panel);
         }
 
+        if (LudicrousProgress.HasValue)
+        {
+            DrawLudicrous(g, LudicrousProgress.Value);
+            return;
+        }
+        if (MarketMode)
+        {
+            if (MarketFrame != null) g.DrawImageUnscaled(MarketFrame, 0, 0);
+            return;
+        }
         if (NetMode)
         {
             DrawNetScene(g);
@@ -118,7 +133,9 @@ sealed class MirrorControl : Control
         // square quota ring: margin 4, thickness 10, clockwise from top-left
         const float m = 4, t = 10;
         const float side = 240 - 2 * m;
-        using (var ring = new SolidBrush(DeviceOK ? Green : Color.FromArgb(90, 90, 90)))
+        var ringColor = RingLevel == 2 ? Color.FromArgb(255, 59, 48)
+            : RingLevel == 1 ? Yellow : Green;
+        using (var ring = new SolidBrush(DeviceOK ? ringColor : Color.FromArgb(90, 90, 90)))
         {
             var remaining = side * 4 * (float)(Math.Clamp(RingPct, 0, 100) / 100);
             const float x0 = m, y0 = m, x1 = 240 - m;
@@ -142,7 +159,7 @@ sealed class MirrorControl : Control
             var state = g.Save();
             g.InterpolationMode = InterpolationMode.NearestNeighbor;
             g.PixelOffsetMode = PixelOffsetMode.Half;
-            g.DrawImage(img, new Rectangle(120 - SpriteW / 2, 120 - SpriteH / 2, SpriteW, SpriteH));
+            g.DrawImage(img, new Rectangle(224 - SpriteW, 18, SpriteW, SpriteH));
             g.Restore(state);
         }
 
@@ -156,6 +173,10 @@ sealed class MirrorControl : Control
             g.DrawString(Line1, font, Brushes.White, new RectangleF(0, 188, 240, 18), fmt);
             g.DrawString(Line2, font, Brushes.White, new RectangleF(0, 206, 240, 18), fmt);
         }
+        using (var dailyFont = new Font("Consolas", 16, FontStyle.Regular, GraphicsUnit.Pixel))
+        using (var dailyFmt = new StringFormat { Alignment = StringAlignment.Center })
+        using (var dailyBrush = new SolidBrush(Color.FromArgb(173, 173, 173)))
+            g.DrawString(DailyLine, dailyFont, dailyBrush, new RectangleF(0, 164, 240, 20), dailyFmt);
 
         if (!DeviceOK)
         {
@@ -174,6 +195,33 @@ sealed class MirrorControl : Control
             g.FillRectangle(red, m, m, t, side);
             g.FillRectangle(red, 240 - m - t, m, t, side);
         }
+    }
+
+    void DrawLudicrous(Graphics g, double progress)
+    {
+        var p = (float)Math.Clamp(progress, 0, 1); var pulse = (float)Math.Sin(p * Math.PI);
+        const float cx = 120, cy = 120;
+        using (var wire = new Pen(Color.FromArgb(190, 200, 200, 200)))
+        {
+            for (var i = 0; i < 14; i++)
+            {
+                var a = i / 14f * MathF.PI * 2 + p * .45f; var inner = 12 + p * 45; var outer = 34 + p * 190;
+                g.DrawLine(wire, cx + MathF.Cos(a) * inner, cy + MathF.Sin(a) * inner,
+                    cx + MathF.Cos(a) * outer, cy + MathF.Sin(a) * outer);
+            }
+        }
+        using (var red = new Pen(Color.FromArgb(230, 255, 59, 48), 2))
+            for (var ring = 0; ring < 3; ring++)
+            { var radius = (p * 150 + ring * 28) % 170; g.DrawEllipse(red, cx - radius, cy - radius, radius * 2, radius * 2); }
+        using (var star = new SolidBrush(Color.FromArgb(180, 255, 255, 255)))
+            for (var i = 0; i < 34; i++)
+            {
+                var seed = (i * 47 % 101) / 101f; var a = i * 29 * MathF.PI / 90; var d = 18 + (seed + p) * 145; var r = .5f + pulse * 1.6f;
+                g.FillEllipse(star, cx + MathF.Cos(a) * d - r, cy + MathF.Sin(a) * d - r, r * 2, r * 2);
+            }
+        using var font = new Font("Consolas", 16, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var fmt = new StringFormat { Alignment = StringAlignment.Center };
+        g.DrawString("LUDICROUS  +", font, Brushes.White, new RectangleF(0, 105, 240, 24), fmt);
     }
 
     void DrawMusicScene(Graphics g)
@@ -345,10 +393,11 @@ sealed class MirrorForm : Form
     readonly StatusService _service;
     readonly NetSpeedMonitor _netMonitor;
     readonly NowPlayingMonitor _nowPlaying;
+    readonly MarketMonitor _market;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music", "btc" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐", "行情" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -364,16 +413,18 @@ sealed class MirrorForm : Form
         Interval = (int)(NetSpeedMonitor.SampleInterval * 1000),
     };
 
-    readonly Dictionary<string, (int Rev, List<Bitmap> Frames, int W, int H)> _spriteCache = new();
+    readonly Dictionary<string, (int Rev, List<Bitmap> Frames, int SourceW, int SourceH, int DrawW, int DrawH)> _spriteCache = new();
     DeviceInfo _lastInfo;
     string _fetchingSlot;
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
-    public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying)
+    public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying,
+                      MarketMonitor market)
     {
         _service = service;
         _netMonitor = netMonitor;
         _nowPlaying = nowPlaying;
+        _market = market;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -557,7 +608,8 @@ sealed class MirrorForm : Form
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "网速曲线"
-            : info.Mode == "music" ? "音乐播放" : "固定显示";
+            : info.Mode == "music" ? "音乐播放"
+            : info.Mode == "btc" ? "行情" : "固定显示";
         _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
     }
 
@@ -569,6 +621,14 @@ sealed class MirrorForm : Form
         var enteringNet = info.Effective == "net" && !_mirror.NetMode;
         _mirror.NetMode = info.Effective == "net";
         _mirror.MusicMode = info.Effective == "music";
+        _mirror.MarketMode = info.Effective == "btc";
+        if (_mirror.MarketMode)
+        {
+            _mirror.MarketFrame?.Dispose();
+            _mirror.MarketFrame = Rgb565.Decode(_market.FrameRgb565, 0, 240, 240);
+            _mirror.Invalidate();
+            return;
+        }
         if (_mirror.NetMode)
         {
             if (enteringNet) _mirror.ResetNetSweep(); // fresh sweep, like the device
@@ -590,6 +650,7 @@ sealed class MirrorForm : Form
             return;
         }
         var snap = _service.Snapshot();
+        UpdateFastAnimation(info, snap);
         _mirror.ShowingClaude = info.Showing != "codex";
         if (_mirror.ShowingClaude)
         {
@@ -597,16 +658,20 @@ sealed class MirrorForm : Form
                 ?? (snap.Claude.SessionWindowMin > 0
                     ? 100.0 * snap.Claude.SessionMin / snap.Claude.SessionWindowMin : 0);
             _mirror.RingPct = pct;
+            _mirror.RingLevel = 0;
             _mirror.Line1 = "5h " + PctText(pct);
             _mirror.Line2 = "Weekly " + PctText(snap.Claude.SevenDayPct);
             _mirror.NeedsInput = snap.Claude.NeedsInput;
+            _mirror.DailyLine = DailyLine(snap.Claude.TokensToday, snap.Claude.CostToday);
         }
         else
         {
-            _mirror.RingPct = snap.Codex.PrimaryPct ?? 0;
-            _mirror.Line1 = "5h " + PctText(snap.Codex.PrimaryPct);
-            _mirror.Line2 = "Weekly " + PctText(snap.Codex.WeeklyPct);
+            _mirror.RingPct = snap.Codex.WeeklyPct ?? 0;
+            _mirror.RingLevel = snap.Codex.WeeklyPct >= 75 ? 2 : snap.Codex.WeeklyPct >= 50 ? 1 : 0;
+            _mirror.Line1 = "Weekly";
+            _mirror.Line2 = PctText(snap.Codex.WeeklyPct);
             _mirror.NeedsInput = snap.Codex.NeedsInput;
+            _mirror.DailyLine = DailyLine(snap.Codex.TokensToday, snap.Codex.CostToday);
         }
         _mirror.Invalidate();
     }
@@ -614,24 +679,33 @@ sealed class MirrorForm : Form
     static string PctText(double? pct) =>
         pct.HasValue && pct.Value >= 0 ? $"{(int)pct.Value}%" : "-";
 
+    static string DailyLine(int tokens, double? cost)
+    {
+        var text = tokens >= 1_000_000 ? $"{tokens / 1_000_000.0:F1}M"
+            : tokens >= 1_000 ? $"{tokens / 1_000.0:F1}K" : tokens.ToString();
+        return $"TODAY {text}  ~{(cost.HasValue ? $"${cost.Value:F2}" : "$?")}";
+    }
+
     void EnsureSprite(DeviceInfo info)
     {
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
+        var drawW = slot == "claude" ? info.ClaudeDisplayW : info.CodexDisplayW;
+        var drawH = slot == "claude" ? info.ClaudeDisplayH : info.CodexDisplayH;
         if (_spriteCache.TryGetValue(slot, out var cached) && cached.Rev == info.SpriteRev)
         {
             _mirror.Frames = cached.Frames;
-            _mirror.SpriteW = cached.W;
-            _mirror.SpriteH = cached.H;
+            _mirror.SpriteW = cached.DrawW;
+            _mirror.SpriteH = cached.DrawH;
             return;
         }
         if (_fetchingSlot == slot) return;
         _fetchingSlot = slot;
-        _ = FetchSprite(slot, info.SpriteRev, w, h);
+        _ = FetchSprite(slot, info.SpriteRev, w, h, drawW, drawH);
     }
 
-    async Task FetchSprite(string slot, int rev, int w, int h)
+    async Task FetchSprite(string slot, int rev, int w, int h, int drawW, int drawH)
     {
         try
         {
@@ -640,12 +714,12 @@ sealed class MirrorForm : Form
             if (frames.Count == 0) return;
             if (_spriteCache.TryGetValue(slot, out var old))
                 foreach (var f in old.Frames) f.Dispose();
-            _spriteCache[slot] = (rev, frames, w, h);
+            _spriteCache[slot] = (rev, frames, w, h, drawW, drawH);
             if ((_lastInfo?.Showing == "codex" ? "codex" : "claude") == slot)
             {
                 _mirror.Frames = frames;
-                _mirror.SpriteW = w;
-                _mirror.SpriteH = h;
+                _mirror.SpriteW = drawW;
+                _mirror.SpriteH = drawH;
                 _mirror.Invalidate();
             }
         }
@@ -660,10 +734,37 @@ sealed class MirrorForm : Form
     }
 
     int _flashCounter;
+    readonly Dictionary<string, long> _baselineFastSeq = new();
+    DateTime? _ludicrousStartedAt;
+
+    void UpdateFastAnimation(DeviceInfo info, StatusSnapshot snapshot)
+    {
+        var sequences = new Dictionary<string, long>
+        { ["claude"] = snapshot.Claude.FastTaskSeq, ["codex"] = snapshot.Codex.FastTaskSeq };
+        if (_baselineFastSeq.Count == 0)
+        {
+            foreach (var pair in sequences) _baselineFastSeq[pair.Key] = pair.Value;
+            return;
+        }
+        var agent = info.Showing == "codex" ? "codex" : "claude";
+        var previous = _baselineFastSeq.TryGetValue(agent, out var value) ? value : sequences[agent];
+        foreach (var pair in sequences) _baselineFastSeq[pair.Key] = pair.Value;
+        if (sequences[agent] > previous && info.Effective is not ("net" or "music" or "btc"))
+        {
+            _ludicrousStartedAt = DateTime.UtcNow; _mirror.LudicrousProgress = 0;
+        }
+    }
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode) return;
+        if (_lastInfo == null || _mirror.NetMode || _mirror.MusicMode || _mirror.MarketMode) return;
+        if (_ludicrousStartedAt.HasValue)
+        {
+            var progress = (DateTime.UtcNow - _ludicrousStartedAt.Value).TotalSeconds / 2.4;
+            if (progress >= 1) { _ludicrousStartedAt = null; _mirror.LudicrousProgress = null; }
+            else _mirror.LudicrousProgress = progress;
+            _mirror.Invalidate(); return;
+        }
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)
