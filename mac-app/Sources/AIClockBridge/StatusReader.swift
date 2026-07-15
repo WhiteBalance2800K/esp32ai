@@ -89,8 +89,9 @@ func codexWeeklyWindow(from limits: [String: Any]) -> CodexWeeklyWindow? {
     return nil
 }
 
-/// Reads the logs and derives status, with a small time cache so back-to-back
-/// HTTP polls and the menu-bar timer don't each re-scan the whole tree.
+/// Reads the logs and derives status. Expensive tree scans refresh a cache in
+/// the background so an ESP HTTP poll never waits behind multi-second JSONL
+/// parsing; hook/quota overlays are still applied synchronously on every call.
 final class StatusService {
     private let claudeDir = ("~/.claude/projects" as NSString).expandingTildeInPath
     private let codexDir = ("~/.codex/sessions" as NSString).expandingTildeInPath
@@ -124,6 +125,11 @@ final class StatusService {
     private var codexFastMode = false
     private var claudeHookTaskSeq: Int64 = 0
     private var codexHookTaskSeq: Int64 = 0
+    private var claudePendingTaskSeq: Int64 = 0
+    private var codexPendingTaskSeq: Int64 = 0
+    /// Detects a task-start hook that arrives while a background log scan is
+    /// running, so stale scan state cannot overwrite the mode used by hooks.
+    private var taskEventGeneration: UInt64 = 0
     private let workingEventTTL: TimeInterval = 10 * 60
     private let idleEventTTL: TimeInterval = 60
     private let needsInputTTL: TimeInterval = 5 * 60
@@ -155,9 +161,16 @@ final class StatusService {
         defer { lock.unlock() }
         let now = Date().timeIntervalSince1970
         if event == "UserPromptSubmit" || event == "task_started" || event == "TaskStarted" {
+            taskEventGeneration &+= 1
             let seq = Int64(now * 1000)
-            if agent == "claude", claudeFastMode { claudeHookTaskSeq = seq }
-            if agent == "codex", codexFastMode { codexHookTaskSeq = seq }
+            if agent == "claude" {
+                claudePendingTaskSeq = max(claudePendingTaskSeq, seq)
+                if claudeFastMode { claudeHookTaskSeq = max(claudeHookTaskSeq, seq) }
+            }
+            if agent == "codex" {
+                codexPendingTaskSeq = max(codexPendingTaskSeq, seq)
+                if codexFastMode { codexHookTaskSeq = max(codexHookTaskSeq, seq) }
+            }
         }
         // Claude Notification: flash only for permission prompts, not for
         // "task done / waiting for your input" notifications.
@@ -204,8 +217,10 @@ final class StatusService {
     private let cacheTTL: TimeInterval = 5
 
     private let lock = NSLock()
+    private let scanQueue = DispatchQueue(label: "aiclock.status-scan", qos: .utility)
     private var cached: Snapshot?
     private var cachedAt: TimeInterval = 0
+    private var refreshInFlight = false
 
     private let isoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -218,25 +233,35 @@ final class StatusService {
         return f
     }()
 
-    func snapshot() -> Snapshot {
+    func snapshot(waitForRefresh: Bool = false) -> Snapshot {
         lock.lock()
-        defer { lock.unlock() }
         let now = Date().timeIntervalSince1970
-        var snap: Snapshot
-        if let c = cached, now - cachedAt < cacheTTL {
-            snap = c
-        } else {
-            snap = Snapshot(claude: readClaude(), codex: readCodex(), ts: Int(now))
-            claudeFastMode = snap.claude.fastMode
-            codexFastMode = snap.codex.fastMode
-            cached = snap
-            cachedAt = now
+        let needsRefresh = cached == nil || now - cachedAt >= cacheTTL
+        let shouldRefresh = needsRefresh && !refreshInFlight
+        if shouldRefresh { refreshInFlight = true }
+        var snap = cached ?? Snapshot(claude: ClaudeStatus(), codex: CodexStatus(), ts: Int(now))
+        let currentClaudeEvent = claudeEvent
+        let currentCodexEvent = codexEvent
+        let currentClaudeNeedsInputAt = claudeNeedsInputAt
+        let currentCodexNeedsInputAt = codexNeedsInputAt
+        let currentClaudeHookTaskSeq = claudeHookTaskSeq
+        let currentCodexHookTaskSeq = codexHookTaskSeq
+        let usageSource = usage
+        let musicProvider = musicPlayingProvider
+        lock.unlock()
+
+        if shouldRefresh {
+            if waitForRefresh {
+                refreshCache()
+                return snapshot()
+            }
+            scanQueue.async { [weak self] in self?.refreshCache() }
         }
         snap.ts = Int(now)
 
         // overlays are cheap and applied on every call, so hook events and
         // fresh quota show through instantly even while the log scan is cached
-        if let u = usage {
+        if let u = usageSource {
             let claudeUsage = u.claude
             snap.claude.fiveHourPct = claudeUsage.primaryPct
             snap.claude.fiveHourResetMin = claudeUsage.primaryResetMin
@@ -248,15 +273,49 @@ final class StatusService {
                 snap.codex.weeklyResetMin = codexUsage.weeklyResetMin
             }
         }
-        snap.claude.status = overrideStatus(snap.claude.status, with: claudeEvent, now: now)
-        snap.codex.status = overrideStatus(snap.codex.status, with: codexEvent, now: now)
-        snap.claude.needsInput = needsInput(claudeNeedsInputAt, now: now)
-        snap.codex.needsInput = needsInput(codexNeedsInputAt, now: now)
-        snap.claude.fastTaskSeq = max(snap.claude.fastTaskSeq, claudeHookTaskSeq)
-        snap.codex.fastTaskSeq = max(snap.codex.fastTaskSeq, codexHookTaskSeq)
+        snap.claude.status = overrideStatus(snap.claude.status, with: currentClaudeEvent, now: now)
+        snap.codex.status = overrideStatus(snap.codex.status, with: currentCodexEvent, now: now)
+        snap.claude.needsInput = needsInput(currentClaudeNeedsInputAt, now: now)
+        snap.codex.needsInput = needsInput(currentCodexNeedsInputAt, now: now)
+        snap.claude.fastTaskSeq = max(snap.claude.fastTaskSeq, currentClaudeHookTaskSeq)
+        snap.codex.fastTaskSeq = max(snap.codex.fastTaskSeq, currentCodexHookTaskSeq)
         snap.preferredAgent = snap.claude.lastActivityAt > snap.codex.lastActivityAt ? "claude" : "codex"
-        snap.musicPlaying = musicPlayingProvider?() ?? false
+        snap.musicPlaying = musicProvider?() ?? false
         return snap
+    }
+
+    /// Runs only on `scanQueue` (or for the explicit CLI wait path). The
+    /// cache commit is tiny and atomic; callers continue receiving the last
+    /// complete snapshot while this method walks and parses session logs.
+    private func refreshCache() {
+        lock.lock()
+        let generationAtStart = taskEventGeneration
+        lock.unlock()
+        let now = Date().timeIntervalSince1970
+        let refreshed = Snapshot(claude: readClaude(), codex: readCodex(), ts: Int(now))
+        lock.lock()
+        let taskArrivedDuringScan = taskEventGeneration != generationAtStart
+        if !taskArrivedDuringScan {
+            claudeFastMode = refreshed.claude.fastMode
+            codexFastMode = refreshed.codex.fastMode
+            // Task hooks are saved unconditionally. Once a clean scan gives
+            // us the authoritative mode, publish the pending sequence only
+            // for Fast/Priority and otherwise discard it as a normal task.
+            if claudeFastMode {
+                claudeHookTaskSeq = max(claudeHookTaskSeq, claudePendingTaskSeq)
+            }
+            if codexFastMode {
+                codexHookTaskSeq = max(codexHookTaskSeq, codexPendingTaskSeq)
+            }
+            claudePendingTaskSeq = 0
+            codexPendingTaskSeq = 0
+        }
+        cached = refreshed
+        // If a task started during the scan, leave hook mode untouched and
+        // make the next HTTP poll immediately schedule a clean follow-up scan.
+        cachedAt = taskArrivedDuringScan ? 0 : Date().timeIntervalSince1970
+        refreshInFlight = false
+        lock.unlock()
     }
 
     // MARK: - helpers

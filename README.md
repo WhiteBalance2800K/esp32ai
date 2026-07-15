@@ -12,8 +12,9 @@
 </p>
 
 <p align="center">
+  <a href="https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/">在线 Web 烧录</a> ·
   <a href="docs/ESP32-C3.md">ESP32-C3 烧录说明</a> ·
-  <a href="web-flasher/">Web 烧录器</a> ·
+  <a href="web-flasher/">本地 Web 烧录器</a> ·
   <a href="https://github.com/pengchujin/esp8266-ai">上游 ESP8266 项目</a>
 </p>
 
@@ -54,7 +55,13 @@
 破坏已验证配置。完整备份、恢复、串口烧录和故障排查见
 [ESP32-C3 安全烧录文档](docs/ESP32-C3.md)。
 
-### 本机 Web 烧录
+### Web 烧录
+
+普通用户请优先打开线上烧录页：
+
+**[https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/)**
+
+如果网络不可用，或需要测试当前仓库构建的固件，可使用本地 Web 烧录器：
 
 ```bash
 cd /path/to/esp32ai
@@ -62,7 +69,7 @@ python3 -m http.server 8000
 ```
 
 用桌面版 Chrome / Edge 打开 `http://localhost:8000/web-flasher/`，确认版本为
-`0.4.6-c3.10` 后连接 ESP32-C3。当前 Web 固件已在上述成品板实机点亮；普通升级（不勾选
+`0.4.6-c3.11` 后连接 ESP32-C3。当前 Web 固件已在上述成品板实机点亮；普通升级（不勾选
 “抹除”）只写入启动、分区表和应用段，会保留 Wi-Fi 凭据与 LittleFS。只有首次安装或主动
 勾选“抹除”才需要重新配网。
 
@@ -81,7 +88,7 @@ python3 -m http.server 8000
 | | |
 |---|---|
 | <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态、额度与当日成本**<br>桌宠动起来 = AI 正在干活。Claude 显示 5 小时 / 周额度，Codex 只显示 Weekly；同时统计本机时间 00:01 到 23:59 的 token 和模型折算金额。AUTO 空闲时保持最近活跃项，不再无意义轮播。Fast / Priority 模式的每次任务会触发 2.4 秒 Ludicrous 全屏动画。 |
-| <img src="docs/images/feature2.jpg" width="360" alt="多市场行情"> | **多市场行情**<br>同一页支持 BTC/ETH、A 股、港股、美股和韩股，以及上证、恒生、SPX、NDX、AAPL、NVDA、KOSPI 等常用标的。收藏列表最多 15 个，行情页每 10 秒自动轮换；腾讯/东方财富/Naver 直连中国大陆网络，无接口时保留最后画面并标记 STALE。 |
+| <img src="docs/images/feature2.jpg" width="360" alt="多市场行情"> | **多市场行情**<br>同一页支持 BTC/ETH、A 股、港股、美股和韩股，以及上证、恒生、SPX、NDX、AAPL、NVDA、KOSPI 等常用标的。收藏列表最多 15 个，行情页可在右键菜单选择 10/30/60/120 秒轮换与刷新；下一标的会提前加载，完整校验后一次切屏，单个接口失败会自动跳过而不拖住轮换。腾讯/东方财富/Naver 可直连中国大陆网络。 |
 | <img src="docs/images/feature2.jpg" width="360" alt="网速监视"> | **网速实时监视**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整。 |
 | <img src="docs/images/music.jpg" width="360" alt="音乐播放"> | **音乐播放显示**<br>专辑封面、歌名、歌手、进度条实时同步；音乐响起自动切入，停止自动切回。 |
 | <img src="docs/images/feature3.jpg" width="360" alt="桌宠可换"> | **可换桌宠**<br>内置 [petdex.dev](https://petdex.dev) 画廊 3300+ 开源桌宠，也可上传任意 GIF，设备板上直接解码，无需重烧固件。 |

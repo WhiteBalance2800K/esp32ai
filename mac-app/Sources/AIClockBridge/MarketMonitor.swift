@@ -17,6 +17,110 @@ enum MarketInterval: String, CaseIterable {
 
 typealias BTCInterval = MarketInterval
 
+/// Compact RGB565 transport for the 240x240 market frame. Control bytes use
+/// a PackBits-style format: bit 7 means a repeated pixel, otherwise a literal
+/// pixel sequence; the lower seven bits store count - 1 (1...128 pixels).
+/// The envelope is: "MKT1", UInt64 version, UInt16 width, UInt16 height,
+/// UInt32 payload CRC, followed by the packed pixel stream. All multibyte
+/// values and pixels stay in the big-endian wire order used by the raw route.
+enum MarketFrameCodec {
+    static let width = 240
+    static let height = 240
+    static let headerBytes = 20
+    private static let magic: [UInt8] = [0x4D, 0x4B, 0x54, 0x31] // MKT1
+
+    static func packRGB565(_ frame: Data) -> Data {
+        guard frame.count == width * height * 2 else { return Data() }
+        let bytes = [UInt8](frame)
+        let pixelCount = width * height
+        var packed = Data(capacity: frame.count / 4)
+        var pixel = 0
+
+        func pixelsEqual(_ lhs: Int, _ rhs: Int) -> Bool {
+            bytes[lhs * 2] == bytes[rhs * 2] && bytes[lhs * 2 + 1] == bytes[rhs * 2 + 1]
+        }
+
+        while pixel < pixelCount {
+            var repeated = 1
+            while repeated < 128, pixel + repeated < pixelCount,
+                  pixelsEqual(pixel, pixel + repeated) {
+                repeated += 1
+            }
+            if repeated >= 2 {
+                packed.append(0x80 | UInt8(repeated - 1))
+                packed.append(bytes[pixel * 2])
+                packed.append(bytes[pixel * 2 + 1])
+                pixel += repeated
+                continue
+            }
+
+            let literalStart = pixel
+            pixel += 1
+            while pixel - literalStart < 128, pixel < pixelCount {
+                var nextRepeated = 1
+                while nextRepeated < 128, pixel + nextRepeated < pixelCount,
+                      pixelsEqual(pixel, pixel + nextRepeated) {
+                    nextRepeated += 1
+                }
+                if nextRepeated >= 2 { break }
+                pixel += 1
+            }
+            let literalCount = pixel - literalStart
+            packed.append(UInt8(literalCount - 1))
+            for byte in (literalStart * 2)..<(pixel * 2) { packed.append(bytes[byte]) }
+        }
+        return packed
+    }
+
+    static func envelope(packed: Data, version: UInt64) -> Data {
+        guard !packed.isEmpty else { return Data() }
+        var out = Data(capacity: headerBytes + packed.count)
+        out.append(contentsOf: magic)
+        for shift in stride(from: 56, through: 0, by: -8) {
+            out.append(UInt8((version >> UInt64(shift)) & 0xFF))
+        }
+        out.append(UInt8(width >> 8)); out.append(UInt8(width & 0xFF))
+        out.append(UInt8(height >> 8)); out.append(UInt8(height & 0xFF))
+        let crc = crc32(packed)
+        out.append(UInt8((crc >> 24) & 0xFF)); out.append(UInt8((crc >> 16) & 0xFF))
+        out.append(UInt8((crc >> 8) & 0xFF)); out.append(UInt8(crc & 0xFF))
+        out.append(packed)
+        return out
+    }
+
+    static func crc32(_ data: Data) -> UInt32 {
+        var crc = UInt32.max
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                crc = (crc >> 1) ^ ((crc & 1) == 0 ? 0 : 0xEDB88320)
+            }
+        }
+        return ~crc
+    }
+}
+
+/// How often the bridge fetches the selected quote and rotates to the next
+/// favorite. The ESP keeps polling the frame version at its own one-second
+/// cadence, so changing this value never requires a firmware update.
+enum MarketRefreshInterval: String, CaseIterable {
+    case tenSeconds = "10"
+    case thirtySeconds = "30"
+    case oneMinute = "60"
+    case twoMinutes = "120"
+
+    var seconds: TimeInterval { Double(rawValue)! }
+
+    var title: String {
+        switch self {
+        case .tenSeconds: return "10 秒"
+        case .thirtySeconds: return "30 秒"
+        case .oneMinute: return "60 秒"
+        case .twoMinutes: return "120 秒"
+        }
+    }
+}
+
 enum MarketRegion: String, Codable {
     case crypto, cn, hk, us, kr
 
@@ -211,6 +315,7 @@ typealias BTCMarketSnapshot = MarketSnapshot
 final class MarketMonitor {
     static let maxFavorites = 15
     private static let favoritesKey = "market_favorite_ids"
+    private static let refreshIntervalKey = "market_refresh_interval"
     // The development build briefly seeded these 15 entries. Treat that exact
     // list as a generated seed, not as user-curated favorites, so it migrates
     // to the smaller default list with room for custom symbols.
@@ -222,7 +327,7 @@ final class MarketMonitor {
     private let queue = DispatchQueue(label: "aiclock.market")
     private let lock = NSLock()
     private var timer: DispatchSourceTimer?
-    private var rotationTimer: DispatchSourceTimer?
+    private var refreshInterval = MarketRefreshInterval.tenSeconds
     private var value = MarketSnapshot()
     // `value` is the complete frame currently safe to show. A rotation only
     // changes the requested instrument; it never replaces this with an empty
@@ -233,15 +338,27 @@ final class MarketMonitor {
     private var rotationIndex = 0
     private var cachedFrame = Data()
     private var cachedFrameKey = ""
+    private var cachedPackedFrame = Data()
     private var snapshotCache: [String: MarketSnapshot] = [:]
     private var frameCache: [String: Data] = [:]
     private var inFlightKeys = Set<String>()
+    private var retryAfter: [String: TimeInterval] = [:]
     private var frameVersion: UInt64 = 1
+    /// Changes on every bridge launch. The device uses this to accept version
+    /// counters from a restarted bridge even if the Mac clock moved backward.
+    private let frameSession = UUID().uuidString
 
     var snapshot: MarketSnapshot {
         lock.lock(); defer { lock.unlock() }
         var copy = value
-        if let at = copy.updatedAt { copy.stale = Date().timeIntervalSince(at) > 120 }
+        if let at = copy.updatedAt {
+            // A 120-second cadence can legitimately leave a frame unchanged
+            // for a little over two minutes while a provider is responding.
+            // Keep the stale marker useful without flagging the chosen cadence
+            // itself as an error.
+            let staleAfter = max(120.0, refreshInterval.seconds * 2.0)
+            copy.stale = Date().timeIntervalSince(at) > staleAfter
+        }
         return copy
     }
 
@@ -258,9 +375,14 @@ final class MarketMonitor {
         return favoriteItems
     }
 
+    var selectedRefreshInterval: MarketRefreshInterval {
+        lock.lock(); defer { lock.unlock() }
+        return refreshInterval
+    }
+
     var frameRGB565: Data {
         let current = snapshot
-        let key = "\(current.instrument.id)|\(current.interval.rawValue)|\(current.updatedAt?.timeIntervalSince1970 ?? 0)|\(current.stale)|\(current.lineOnly)"
+        let key = Self.frameKey(current)
         lock.lock()
         if !cachedFrame.isEmpty, cachedFrameKey == key {
             let frame = cachedFrame
@@ -270,7 +392,10 @@ final class MarketMonitor {
         lock.unlock()
         let frame = MarketFrameRenderer.rgb565(snapshot: current)
         lock.lock()
-        if value.instrument.id == current.instrument.id, value.interval == current.interval {
+        // Rendering happens outside the lock. Only publish it if the complete
+        // snapshot is still current; otherwise a just-finished older render
+        // could overwrite the frame selected by the menu or rotation timer.
+        if Self.frameKey(value) == key {
             cachedFrame = frame
             cachedFrameKey = key
         }
@@ -284,7 +409,7 @@ final class MarketMonitor {
     var frameEnvelope: Data {
         lock.lock()
         let current = value
-        let key = "\(current.instrument.id)|\(current.interval.rawValue)|\(current.updatedAt?.timeIntervalSince1970 ?? 0)|\(current.stale)|\(current.lineOnly)"
+        let key = Self.frameKey(current)
         if !cachedFrame.isEmpty, cachedFrameKey == key {
             let frame = cachedFrame
             let version = frameVersion
@@ -309,14 +434,30 @@ final class MarketMonitor {
         return out
     }
 
+    /// Fully rendered, compressed and checksummed frame used by ESP32-C3.
+    /// It is prepared when the market snapshot changes, not in the HTTP
+    /// request path, so even the first byte can be served immediately.
+    var packedFrameEnvelope: Data {
+        lock.lock(); defer { lock.unlock() }
+        return cachedPackedFrame
+    }
+
     var frameVersionJSON: Data {
         lock.lock()
         let version = frameVersion
         let s = value
+        let packedBytes = cachedPackedFrame.count
+        // Keep the session empty for the initial WAITING frame. On a bridge
+        // restart this lets the device retain its last good market screen
+        // until the first real quote is fully rendered and ready to replace it.
+        let session = version > 1 ? frameSession : ""
         lock.unlock()
         let object: [String: Any] = [
             "version": NSNumber(value: version),
+            "session": session,
             "bytes": 240 * 240 * 2,
+            "packed_bytes": packedBytes,
+            "codec": "rgb565-packbits-v1",
             "instrument": s.instrument.id,
             "interval": s.interval.rawValue,
         ]
@@ -339,10 +480,16 @@ final class MarketMonitor {
            let saved = MarketInterval(rawValue: raw) {
             value.interval = saved
         }
+        if let raw = UserDefaults.standard.string(forKey: Self.refreshIntervalKey),
+           let saved = MarketRefreshInterval(rawValue: raw) {
+            refreshInterval = saved
+        }
         requestedInstrument = value.instrument
         requestedInterval = value.interval
         cachedFrame = MarketFrameRenderer.rgb565(snapshot: value)
-        cachedFrameKey = "\(value.instrument.id)|\(value.interval.rawValue)|0|true|false"
+        cachedFrameKey = Self.frameKey(value)
+        cachedPackedFrame = MarketFrameCodec.envelope(
+            packed: MarketFrameCodec.packRGB565(cachedFrame), version: frameVersion)
         let initialKey = cacheKey(value.instrument, interval: value.interval)
         snapshotCache[initialKey] = value
         frameCache[initialKey] = cachedFrame
@@ -351,25 +498,32 @@ final class MarketMonitor {
 
     deinit {
         timer?.cancel()
-        rotationTimer?.cancel()
     }
 
     func start() {
         guard timer == nil else { return }
+        let cadence = selectedRefreshInterval.seconds
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: 20)
-        timer.setEventHandler { [weak self] in self?.refresh() }
+        timer.schedule(deadline: .now() + cadence, repeating: cadence)
+        timer.setEventHandler { [weak self] in self?.cadenceTick() }
         timer.resume()
         self.timer = timer
 
-        // Prime the next favorite while the current frame is being fetched.
-        queue.async { [weak self] in self?.prefetchNext() }
+        // The initial fetch also primes the next favorite. Subsequent ticks
+        // run through one state machine, avoiding same-deadline timer races.
+        queue.async { [weak self] in self?.refresh() }
+    }
 
-        let rotation = DispatchSource.makeTimerSource(queue: queue)
-        rotation.schedule(deadline: .now() + 10, repeating: 10)
-        rotation.setEventHandler { [weak self] in self?.rotateFavorite() }
-        rotation.resume()
-        rotationTimer = rotation
+    func setRefreshInterval(_ interval: MarketRefreshInterval) {
+        lock.lock()
+        refreshInterval = interval
+        let dataTimer = timer
+        lock.unlock()
+        UserDefaults.standard.set(interval.rawValue, forKey: Self.refreshIntervalKey)
+
+        dataTimer?.schedule(deadline: .now() + interval.seconds,
+                            repeating: interval.seconds)
+        queue.async { [weak self] in self?.refresh() }
     }
 
     func setInterval(_ interval: MarketInterval) {
@@ -445,15 +599,31 @@ final class MarketMonitor {
         return frameVersion
     }
 
+    private static func frameKey(_ snapshot: MarketSnapshot) -> String {
+        "\(snapshot.instrument.id)|\(snapshot.interval.rawValue)|" +
+            "\(snapshot.updatedAt?.timeIntervalSince1970 ?? 0)|" +
+            "\(snapshot.stale)|\(snapshot.lineOnly)"
+    }
+
     /// Atomically swaps only a complete, rendered frame. The old frame stays
     /// visible until this function runs, so a slow API never creates a blank
     /// or half-populated market page.
     private func activate(_ snapshot: MarketSnapshot, frame: Data) {
+        let packed = MarketFrameCodec.packRGB565(frame)
         lock.lock()
+        guard requestedInstrument.id == snapshot.instrument.id,
+              requestedInterval == snapshot.interval else {
+            lock.unlock()
+            return
+        }
+        let pixelsChanged = cachedFrame != frame || cachedPackedFrame.isEmpty
         value = snapshot
         cachedFrame = frame
-        cachedFrameKey = "\(snapshot.instrument.id)|\(snapshot.interval.rawValue)|\(snapshot.updatedAt?.timeIntervalSince1970 ?? 0)|\(snapshot.stale)|\(snapshot.lineOnly)"
-        _ = nextFrameVersionLocked()
+        cachedFrameKey = Self.frameKey(snapshot)
+        if pixelsChanged {
+            let version = nextFrameVersionLocked()
+            cachedPackedFrame = MarketFrameCodec.envelope(packed: packed, version: version)
+        }
         lock.unlock()
     }
 
@@ -465,18 +635,32 @@ final class MarketMonitor {
         request(target, interval: interval)
     }
 
+    /// Refresh and rotation deliberately share one serial cadence. Rotating
+    /// first publishes the frame prepared during the previous dwell period;
+    /// `setInstrument` then refreshes it and starts preloading its successor.
+    private func cadenceTick() {
+        lock.lock()
+        let shouldRotate = favoriteItems.count > 1
+        lock.unlock()
+        if shouldRotate { rotateFavoriteIfReady() } else { refresh() }
+    }
+
     /// Fetches one instrument at a time per cache key. A prefetch request and
     /// a later user/rotation selection share the same in-flight request; when
     /// it completes, the current selection is activated automatically.
     private func request(_ instrument: MarketInstrument, interval: MarketInterval) {
         let key = cacheKey(instrument, interval: interval)
         lock.lock()
+        let isCurrentTarget = requestedInstrument.id == instrument.id && requestedInterval == interval
         guard !inFlightKeys.contains(key) else {
             lock.unlock()
+            // A prefetch can still be running when its item becomes current.
+            // Continue the pipeline so the following favorite gets a full
+            // dwell interval to load instead of waiting for the next tick.
+            if isCurrentTarget { prefetchNext() }
             return
         }
         inFlightKeys.insert(key)
-        let isCurrentTarget = requestedInstrument.id == instrument.id && requestedInterval == interval
         lock.unlock()
 
         // Start the next request while this one is in flight. For crypto and
@@ -497,22 +681,41 @@ final class MarketMonitor {
             lock.unlock()
             return
         }
-        let nextIndex = (rotationIndex + 1) % favoriteItems.count
-        let next = favoriteItems[nextIndex]
         let interval = requestedInterval
+        let now = Date().timeIntervalSince1970
+        var next: MarketInstrument?
+        for offset in 1..<favoriteItems.count {
+            let candidate = favoriteItems[(rotationIndex + offset) % favoriteItems.count]
+            let key = cacheKey(candidate, interval: interval)
+            let ready = snapshotCache[key] != nil && frameCache[key] != nil
+            // The first ready successor is enough for an atomic next switch.
+            if ready { break }
+            if inFlightKeys.contains(key) { break }
+            if (retryAfter[key] ?? 0) > now { continue }
+            next = candidate
+            break
+        }
         lock.unlock()
-        request(next, interval: interval)
+        if let next { request(next, interval: interval) }
     }
 
     private func finishRequest(_ result: Result<MarketSnapshot, Error>,
                                instrument: MarketInstrument, interval: MarketInterval, key: String) {
         guard case let .success(snapshot) = result else {
-            lock.lock(); inFlightKeys.remove(key); lock.unlock()
+            lock.lock()
+            inFlightKeys.remove(key)
+            // One unreachable provider must not head-of-line block every
+            // later favorite. Skip it for 30 seconds and immediately warm
+            // the next viable candidate; the favorite itself is preserved.
+            retryAfter[key] = Date().timeIntervalSince1970 + 30
+            lock.unlock()
+            prefetchNext()
             return
         }
         let frame = MarketFrameRenderer.rgb565(snapshot: snapshot)
         lock.lock()
         inFlightKeys.remove(key)
+        retryAfter.removeValue(forKey: key)
         snapshotCache[key] = snapshot
         frameCache[key] = frame
         let shouldActivate = requestedInstrument.id == instrument.id && requestedInterval == interval
@@ -539,13 +742,32 @@ final class MarketMonitor {
         }
     }
 
-    private func rotateFavorite() {
+    /// Never expose provider latency as a late visual transition. A favorite
+    /// only becomes current when both its snapshot and rendered frame were
+    /// completed during the previous dwell; otherwise the current frame stays
+    /// on screen and the missing successor keeps preloading in the background.
+    private func rotateFavoriteIfReady() {
         lock.lock()
         guard favoriteItems.count > 1 else { lock.unlock(); return }
-        rotationIndex = (rotationIndex + 1) % favoriteItems.count
-        let next = favoriteItems[rotationIndex]
+        let interval = requestedInterval
+        var nextIndex: Int?
+        for offset in 1..<favoriteItems.count {
+            let candidateIndex = (rotationIndex + offset) % favoriteItems.count
+            let candidate = favoriteItems[candidateIndex]
+            let key = cacheKey(candidate, interval: interval)
+            if snapshotCache[key] != nil && frameCache[key] != nil {
+                nextIndex = candidateIndex
+                break
+            }
+        }
+        let next = nextIndex.map { favoriteItems[$0] }
+        if let nextIndex { rotationIndex = nextIndex }
         lock.unlock()
-        setInstrument(next)
+        if let next {
+            setInstrument(next)
+        } else {
+            prefetchNext()
+        }
     }
 
     private func getJSON(_ url: URL, completion: @escaping (Result<Any, Error>) -> Void) {

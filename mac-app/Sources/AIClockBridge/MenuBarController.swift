@@ -108,6 +108,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         btcIntervalItem.submenu = btcIntervalMenu
         menu.addItem(btcIntervalItem)
 
+        let marketRefreshMenu = NSMenu()
+        for interval in MarketRefreshInterval.allCases {
+            let item = NSMenuItem(title: interval.title,
+                                  action: #selector(setMarketRefreshInterval(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = interval.rawValue
+            item.state = market.selectedRefreshInterval == interval ? .on : .off
+            marketRefreshMenu.addItem(item)
+        }
+        let marketRefreshItem = NSMenuItem(title: "行情刷新间隔", action: nil, keyEquivalent: "")
+        marketRefreshItem.submenu = marketRefreshMenu
+        menu.addItem(marketRefreshItem)
+
         rebuildMarketInstrumentMenu()
         let instrumentItem = NSMenuItem(title: "行情标的", action: nil, keyEquivalent: "")
         instrumentItem.submenu = instrumentMenu
@@ -150,6 +164,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         refreshDeviceSection()
         rebuildMarketInstrumentMenu()
         updateMarketInstrumentStates()
+        updateMarketRefreshIntervalStates()
     }
 
     private func refreshUsageLines() {
@@ -304,6 +319,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         sender.menu?.items.forEach { $0.state = $0 === sender ? .on : .off }
     }
 
+    @objc private func setMarketRefreshInterval(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let interval = MarketRefreshInterval(rawValue: raw) else { return }
+        market.setRefreshInterval(interval)
+        updateMarketRefreshIntervalStates()
+    }
+
     @objc private func setMarketInstrument(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
               let instrument = market.favorites.first(where: { $0.id == id }) else { return }
@@ -353,6 +375,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let selected = market.instrument.id
         marketInstrumentItems.values.forEach { $0.state = .off }
         marketInstrumentItems[selected]?.state = .on
+    }
+
+    private func updateMarketRefreshIntervalStates() {
+        guard let refreshMenu = controlMenu.items.first(where: { $0.title == "行情刷新间隔" })?.submenu else { return }
+        let selected = market.selectedRefreshInterval.rawValue
+        refreshMenu.items.forEach { item in
+            item.state = (item.representedObject as? String) == selected ? .on : .off
+        }
     }
 
     @objc private func openPetPicker() {

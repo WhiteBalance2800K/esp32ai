@@ -115,6 +115,17 @@ final class HTTPServer {
             + "Connection: close\r\n\r\n"
         var response = Data(header.utf8)
         response.append(body)
-        conn.send(content: response, completion: .contentProcessed { _ in conn.cancel() })
+        // `contentProcessed` only means Network.framework accepted the bytes;
+        // it does not mean a small-window client such as the ESP32-C3 has
+        // received them. Cancelling here used to reset large responses after
+        // roughly one TCP window. Mark the response as the final message so
+        // Network.framework closes the write side gracefully after draining.
+        conn.send(content: response, contentContext: .finalMessage, isComplete: true,
+                  completion: .contentProcessed { error in
+            if let error {
+                FileHandle.standardError.write(Data("[http] send failed: \(error)\n".utf8))
+            }
+            conn.cancel()
+        })
     }
 }
