@@ -12,8 +12,9 @@
 </p>
 
 <p align="center">
+  <a href="https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/">在线 Web 烧录</a> ·
   <a href="docs/ESP32-C3.md">ESP32-C3 烧录说明</a> ·
-  <a href="web-flasher/">Web 烧录器</a> ·
+  <a href="web-flasher/">本地 Web 烧录器</a> ·
   <a href="https://github.com/pengchujin/esp8266-ai">上游 ESP8266 项目</a>
 </p>
 
@@ -54,7 +55,13 @@
 破坏已验证配置。完整备份、恢复、串口烧录和故障排查见
 [ESP32-C3 安全烧录文档](docs/ESP32-C3.md)。
 
-### 本机 Web 烧录
+### Web 烧录
+
+普通用户请优先打开线上烧录页：
+
+**[https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/)**
+
+如果网络不可用，或需要测试当前仓库构建的固件，可使用本地 Web 烧录器：
 
 ```bash
 cd /path/to/esp32ai
