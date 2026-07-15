@@ -766,6 +766,9 @@ final class MarketMonitor {
         if let next {
             setInstrument(next)
         } else {
+            // Keep the visible quote current even when every successor is
+            // still loading or temporarily unreachable.
+            refresh()
             prefetchNext()
         }
     }

@@ -20,19 +20,28 @@ class ClaudeStatus
     public double? SevenDayPct;
     public int? SevenDayResetMin;
     public bool NeedsInput; // waiting on a permission/approval prompt
+    public double? CostToday;
+    public bool CostComplete = true;
+    public long LastActivityAt;
+    public bool FastMode;
+    public long FastTaskSeq;
+    internal long SessionStartedAt;
 }
 
 class CodexStatus
 {
     public string Status = "offline";
     public int TokensToday;
-    public double? PrimaryPct;
-    public int? PrimaryWindowMin;
-    public int? PrimaryResetMin;
     public double? WeeklyPct;
     public int? WeeklyWindowMin;
     public int? WeeklyResetMin;
     public bool NeedsInput;
+    public double? CostToday;
+    public bool CostComplete = true;
+    public long LastActivityAt;
+    public bool FastMode;
+    public long FastTaskSeq;
+    internal long WeeklyResetAt;
 }
 
 class StatusSnapshot
@@ -41,6 +50,7 @@ class StatusSnapshot
     public CodexStatus Codex = new();
     public long Ts;
     public bool MusicPlaying;
+    public string PreferredAgent = "codex";
 
     /// Serializes to the exact JSON shape the firmware's parseStatusJson expects.
     public byte[] ToJson()
@@ -51,6 +61,7 @@ class StatusSnapshot
             w.WriteStartObject();
             w.WriteNumber("ts", Ts);
             w.WriteBoolean("music_playing", MusicPlaying);
+            w.WriteString("preferred_agent", PreferredAgent);
             w.WriteStartObject("claude");
             w.WriteString("status", Claude.Status);
             w.WriteNumber("tokens_today", Claude.TokensToday);
@@ -61,17 +72,24 @@ class StatusSnapshot
             WriteNullable(w, "seven_day_pct", Claude.SevenDayPct);
             WriteNullable(w, "seven_day_reset_min", Claude.SevenDayResetMin);
             w.WriteBoolean("needs_input", Claude.NeedsInput);
+            WriteNullable(w, "cost_today_usd", Claude.CostToday);
+            w.WriteBoolean("cost_complete", Claude.CostComplete);
+            w.WriteNumber("last_activity_at", Claude.LastActivityAt);
+            w.WriteBoolean("fast_mode", Claude.FastMode);
+            w.WriteNumber("fast_task_seq", Claude.FastTaskSeq);
             w.WriteEndObject();
             w.WriteStartObject("codex");
             w.WriteString("status", Codex.Status);
             w.WriteNumber("tokens_today", Codex.TokensToday);
-            WriteNullable(w, "primary_pct", Codex.PrimaryPct);
-            WriteNullable(w, "primary_window_min", Codex.PrimaryWindowMin);
-            WriteNullable(w, "primary_reset_min", Codex.PrimaryResetMin);
             WriteNullable(w, "weekly_pct", Codex.WeeklyPct);
             WriteNullable(w, "weekly_window_min", Codex.WeeklyWindowMin);
             WriteNullable(w, "weekly_reset_min", Codex.WeeklyResetMin);
             w.WriteBoolean("needs_input", Codex.NeedsInput);
+            WriteNullable(w, "cost_today_usd", Codex.CostToday);
+            w.WriteBoolean("cost_complete", Codex.CostComplete);
+            w.WriteNumber("last_activity_at", Codex.LastActivityAt);
+            w.WriteBoolean("fast_mode", Codex.FastMode);
+            w.WriteNumber("fast_task_seq", Codex.FastTaskSeq);
             w.WriteEndObject();
             w.WriteEndObject();
         }
@@ -105,6 +123,7 @@ class StatusSnapshot
             Codex = (CodexStatus)Codex.MemberwiseCloneOf(),
             Ts = Ts,
             MusicPlaying = MusicPlaying,
+            PreferredAgent = PreferredAgent,
         };
     }
 }
@@ -114,7 +133,9 @@ static class CloneHelper
     public static object MemberwiseCloneOf(this object o)
     {
         var clone = Activator.CreateInstance(o.GetType());
-        foreach (var f in o.GetType().GetFields())
+        foreach (var f in o.GetType().GetFields(System.Reflection.BindingFlags.Instance
+                                                | System.Reflection.BindingFlags.Public
+                                                | System.Reflection.BindingFlags.NonPublic))
             f.SetValue(clone, f.GetValue(o));
         return clone;
     }
@@ -151,6 +172,15 @@ sealed class StatusService
     // event (the prompt got answered) or by TTL.
     double? _claudeNeedsInputAt;
     double? _codexNeedsInputAt;
+    bool _claudeFastMode;
+    bool _codexFastMode;
+    long _claudeHookTaskSeq;
+    long _codexHookTaskSeq;
+    long _claudePendingTaskSeq;
+    long _codexPendingTaskSeq;
+    int _claudePendingScanCount;
+    int _codexPendingScanCount;
+    ulong _taskEventGeneration;
     const double WorkingEventTTL = 10 * 60;
     const double IdleEventTTL = 60;
     const double NeedsInputTTL = 5 * 60;
@@ -158,7 +188,7 @@ sealed class StatusService
     static readonly HashSet<string> WorkingEvents = new()
     {
         "UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
-        "PreCompact", "PostCompact", "WorktreeCreate",
+        "PreCompact", "PostCompact", "WorktreeCreate", "task_started", "TaskStarted",
     };
     static readonly HashSet<string> IdleEvents = new() { "Stop", "SessionEnd", "SessionStart" };
     // Codex PermissionRequest and MCP Elicitation are always a real "act now"
@@ -180,6 +210,28 @@ sealed class StatusService
         lock (_lock)
         {
             var now = Now();
+            if (ev is "UserPromptSubmit" or "task_started" or "TaskStarted")
+            {
+                _taskEventGeneration++;
+                // The hook can arrive before the CLI appends fast/priority
+                // metadata to JSONL, so the next refresh must not take the
+                // unchanged-fingerprint shortcut.
+                _lastLogFingerprint = DirtyLogFingerprint;
+                _cachedAt = 0;
+                var seq = (long)(now * 1000);
+                if (agent == "claude")
+                {
+                    _claudePendingTaskSeq = Math.Max(_claudePendingTaskSeq, seq);
+                    _claudePendingScanCount = 0;
+                    if (_claudeFastMode) _claudeHookTaskSeq = Math.Max(_claudeHookTaskSeq, seq);
+                }
+                else if (agent == "codex")
+                {
+                    _codexPendingTaskSeq = Math.Max(_codexPendingTaskSeq, seq);
+                    _codexPendingScanCount = 0;
+                    if (_codexFastMode) _codexHookTaskSeq = Math.Max(_codexHookTaskSeq, seq);
+                }
+            }
             // Claude Notification: flash only for permission prompts, not for
             // "task done / waiting for your input" notifications.
             if (ev == "Notification")
@@ -229,54 +281,134 @@ sealed class StatusService
     readonly object _lock = new();
     StatusSnapshot _cached;
     double _cachedAt;
+    bool _refreshInFlight;
+    long _lastLogFingerprint;
+    const long DirtyLogFingerprint = long.MinValue;
 
     static double Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
 
     public StatusSnapshot Snapshot()
     {
+        StatusSnapshot snap;
+        UsageFetcher usage;
+        Func<bool> music;
+        AgentEvent claudeEvent, codexEvent;
+        double? claudeInputAt, codexInputAt;
+        long claudeHookSeq, codexHookSeq;
+        var now = Now();
         lock (_lock)
         {
-            var now = Now();
-            StatusSnapshot snap;
-            if (_cached != null && now - _cachedAt < CacheTTL)
+            var needsRefresh = _cached == null || now - _cachedAt >= CacheTTL;
+            if (needsRefresh && !_refreshInFlight)
             {
-                snap = _cached.Clone();
+                _refreshInFlight = true;
+                _ = Task.Run(RefreshCache);
             }
-            else
-            {
-                snap = new StatusSnapshot(ReadClaude(), ReadCodex(), (long)now);
-                _cached = snap.Clone();
-                _cachedAt = now;
-            }
-            snap.Ts = (long)now;
+            snap = (_cached ?? new StatusSnapshot(new(), new(), (long)now)).Clone();
+            usage = Usage; music = MusicPlayingProvider;
+            claudeEvent = _claudeEvent; codexEvent = _codexEvent;
+            claudeInputAt = _claudeNeedsInputAt; codexInputAt = _codexNeedsInputAt;
+            claudeHookSeq = _claudeHookTaskSeq; codexHookSeq = _codexHookTaskSeq;
+        }
+        snap.Ts = (long)now;
+        snap.Claude.Status = StatusFromDelta(snap.Claude.LastActivityAt > 0 ? now - snap.Claude.LastActivityAt : 1e9);
+        snap.Codex.Status = StatusFromDelta(snap.Codex.LastActivityAt > 0 ? now - snap.Codex.LastActivityAt : 1e9);
+        if (snap.Claude.SessionStartedAt > 0)
+        {
+            var elapsed = now - snap.Claude.SessionStartedAt;
+            snap.Claude.SessionMin = elapsed is >= 0 and < 5 * 3600 ? (int)(elapsed / 60) : 0;
+        }
+        if (snap.Codex.WeeklyResetAt > 0)
+            snap.Codex.WeeklyResetMin = Math.Max(0, (int)((snap.Codex.WeeklyResetAt - now) / 60));
+        if (usage != null)
+        {
+            var cu = usage.Claude;
+            snap.Claude.FiveHourPct = cu.PrimaryPct; snap.Claude.FiveHourResetMin = cu.PrimaryResetMin;
+            snap.Claude.SevenDayPct = cu.WeeklyPct; snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
+            var xu = usage.Codex;
+            if (xu.WeeklyPct.HasValue) { snap.Codex.WeeklyPct = xu.WeeklyPct; snap.Codex.WeeklyResetMin = xu.WeeklyResetMin; }
+        }
+        snap.Claude.Status = OverrideStatus(snap.Claude.Status, claudeEvent, now);
+        snap.Codex.Status = OverrideStatus(snap.Codex.Status, codexEvent, now);
+        snap.Claude.NeedsInput = NeedsInput(claudeInputAt, now); snap.Codex.NeedsInput = NeedsInput(codexInputAt, now);
+        snap.Claude.FastTaskSeq = Math.Max(snap.Claude.FastTaskSeq, claudeHookSeq);
+        snap.Codex.FastTaskSeq = Math.Max(snap.Codex.FastTaskSeq, codexHookSeq);
+        snap.PreferredAgent = snap.Claude.LastActivityAt > snap.Codex.LastActivityAt ? "claude" : "codex";
+        snap.MusicPlaying = music?.Invoke() ?? false;
+        return snap;
+    }
 
-            // overlays are cheap and applied on every call, so hook events and
-            // fresh quota show through instantly even while the log scan is cached
-            if (Usage != null)
+    void RefreshCache()
+    {
+        ulong generation;
+        lock (_lock) generation = _taskEventGeneration;
+        var fingerprint = LogFingerprint();
+        lock (_lock)
+        {
+            if (_cached != null && fingerprint == _lastLogFingerprint)
             {
-                var cu = Usage.Claude;
-                snap.Claude.FiveHourPct = cu.PrimaryPct;
-                snap.Claude.FiveHourResetMin = cu.PrimaryResetMin;
-                snap.Claude.SevenDayPct = cu.WeeklyPct;
-                snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
-                var xu = Usage.Codex;
-                if (xu.PrimaryPct.HasValue)
-                {
-                    snap.Codex.PrimaryPct = xu.PrimaryPct;
-                    snap.Codex.PrimaryResetMin = xu.PrimaryResetMin;
-                }
-                if (xu.WeeklyPct.HasValue)
-                {
-                    snap.Codex.WeeklyPct = xu.WeeklyPct;
-                    snap.Codex.WeeklyResetMin = xu.WeeklyResetMin;
-                }
+                _cachedAt = Now(); _refreshInFlight = false;
+                return;
             }
-            snap.Claude.Status = OverrideStatus(snap.Claude.Status, _claudeEvent, now);
-            snap.Codex.Status = OverrideStatus(snap.Codex.Status, _codexEvent, now);
-            snap.Claude.NeedsInput = NeedsInput(_claudeNeedsInputAt, now);
-            snap.Codex.NeedsInput = NeedsInput(_codexNeedsInputAt, now);
-            snap.MusicPlaying = MusicPlayingProvider?.Invoke() ?? false;
-            return snap;
+        }
+        StatusSnapshot refreshed = null;
+        try { refreshed = new StatusSnapshot(ReadClaude(), ReadCodex(), (long)Now()); }
+        catch (Exception e) { Console.Error.WriteLine($"[status] scan failed: {e.Message}"); }
+        lock (_lock)
+        {
+            var taskArrived = generation != _taskEventGeneration;
+            if (refreshed != null && !taskArrived)
+            {
+                _claudeFastMode = refreshed.Claude.FastMode; _codexFastMode = refreshed.Codex.FastMode;
+                if (_claudeFastMode)
+                {
+                    _claudeHookTaskSeq = Math.Max(_claudeHookTaskSeq, _claudePendingTaskSeq);
+                    _claudePendingTaskSeq = 0;
+                    _claudePendingScanCount = 0;
+                }
+                else if (_claudePendingTaskSeq > 0 && ++_claudePendingScanCount >= 2)
+                    _claudePendingTaskSeq = 0;
+                if (_codexFastMode)
+                {
+                    _codexHookTaskSeq = Math.Max(_codexHookTaskSeq, _codexPendingTaskSeq);
+                    _codexPendingTaskSeq = 0;
+                    _codexPendingScanCount = 0;
+                }
+                else if (_codexPendingTaskSeq > 0 && ++_codexPendingScanCount >= 2)
+                    _codexPendingTaskSeq = 0;
+            }
+            if (refreshed != null) _cached = refreshed;
+            var pendingFastDetection = _claudePendingTaskSeq > 0 || _codexPendingTaskSeq > 0;
+            _lastLogFingerprint = refreshed != null && !taskArrived && !pendingFastDetection
+                ? fingerprint : DirtyLogFingerprint;
+            _cachedAt = refreshed == null || taskArrived ? 0 : Now();
+            _refreshInFlight = false;
+        }
+    }
+
+    long LogFingerprint()
+    {
+        unchecked
+        {
+            // Daily totals roll over at local 00:01 even if no CLI log changes.
+            var localNow = DateTime.Now;
+            var usageDay = localNow < localNow.Date.AddMinutes(1) ? localNow.Date.AddDays(-1) : localNow.Date;
+            long hash = 17 * 31 + usageDay.Ticks;
+            foreach (var root in new[] { _claudeDir, _codexDir })
+            {
+                if (!Directory.Exists(root)) continue;
+                try
+                {
+                    foreach (var path in Directory.EnumerateFiles(root, "*.jsonl", SearchOption.AllDirectories))
+                    {
+                        var info = new FileInfo(path);
+                        hash = hash * 31 + info.Length;
+                        hash = hash * 31 + info.LastWriteTimeUtc.Ticks;
+                    }
+                }
+                catch { hash = hash * 31 + root.GetHashCode(); }
+            }
+            return hash;
         }
     }
 
@@ -297,22 +429,36 @@ sealed class StatusService
         return null;
     }
 
-    static double TodayStartEpoch() =>
-        new DateTimeOffset(DateTime.Today).ToUnixTimeMilliseconds() / 1000.0;
+    internal static DateTime UsageWindowStart(DateTime date) => date.Date.AddMinutes(1);
+    static double TodayStartEpoch() => new DateTimeOffset(UsageWindowStart(DateTime.Now)).ToUnixTimeMilliseconds() / 1000.0;
+    static double TodayEndEpoch() => new DateTimeOffset(DateTime.Today.AddDays(1)).ToUnixTimeMilliseconds() / 1000.0;
 
-    /// Lossy UTF-8 read split into lines (skips files locked by the CLIs).
-    static string[] ReadLines(string path)
+    /// Stream one line at a time while the CLI may still be appending. Avoid
+    /// ReadToEnd+Split: current session logs can be hundreds of MB and that
+    /// allocation caused global GC pauses even though scanning is background.
+    static IEnumerable<string> ReadLines(string path)
     {
+        FileStream fs;
         try
         {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
-                                          FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(fs, Encoding.UTF8);
-            return reader.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                FileShare.ReadWrite | FileShare.Delete);
         }
         catch
         {
-            return null;
+            yield break;
+        }
+        using (fs)
+        using (var reader = new StreamReader(fs, Encoding.UTF8))
+        {
+            while (true)
+            {
+                string line;
+                try { line = reader.ReadLine(); }
+                catch { yield break; }
+                if (line == null) yield break;
+                if (line.Length > 0) yield return line;
+            }
         }
     }
 
@@ -351,17 +497,23 @@ sealed class StatusService
     ClaudeStatus ReadClaude()
     {
         var todayStart = TodayStartEpoch();
+        var todayEnd = TodayEndEpoch();
         var now = Now();
         var tokensToday = 0;
-        double lastMtime = 0;
+        var costToday = 0.0;
+        var costComplete = true;
+        double lastMtime = 0, lastActivity = 0, latestFastAt = 0;
         double? firstActiveInWindow = null;
+        var fastMode = false;
+        long fastTaskSeq = 0;
+        var usageEntries = new Dictionary<string, ClaudeUsageEntry>();
 
         if (Directory.Exists(_claudeDir))
         {
             IEnumerable<string> files;
             try
             {
-                files = Directory.EnumerateFiles(_claudeDir, "*.jsonl", SearchOption.AllDirectories);
+                files = Directory.GetFiles(_claudeDir, "*.jsonl", SearchOption.AllDirectories);
             }
             catch
             {
@@ -383,21 +535,47 @@ sealed class StatusService
                 if (mtime < todayStart) continue; // no activity today, skip parsing
                 var lines = ReadLines(file);
                 if (lines == null) continue;
+                var fileFastMode = false;
+                double? fileLastUserAt = null;
                 foreach (var line in lines)
                 {
-                    if (!line.Contains("\"usage\":{")) continue;
                     JsonDocument doc;
                     try { doc = JsonDocument.Parse(line); } catch { continue; }
                     using (doc)
                     {
                         var root = doc.RootElement;
+                        var entryEpoch = ParseIso(StringVal(root, "timestamp"));
+                        var type = StringVal(root, "type") ?? "";
+                        if (entryEpoch.HasValue && (type == "user" || type == "assistant"))
+                            lastActivity = Math.Max(lastActivity, entryEpoch.Value);
+                        if (type == "user" && entryEpoch.HasValue)
+                        {
+                            fileLastUserAt = entryEpoch;
+                            if (fileFastMode) fastTaskSeq = Math.Max(fastTaskSeq, (long)(entryEpoch.Value * 1000));
+                        }
                         if (!TryProp(root, "message", out var message)
                             || !TryProp(message, "usage", out var usage)) continue;
-                        var entryEpoch = ParseIso(StringVal(root, "timestamp"));
-                        if (entryEpoch.HasValue && entryEpoch.Value < todayStart) continue;
-                        tokensToday += IntVal(usage, "input_tokens") + IntVal(usage, "output_tokens")
-                            + IntVal(usage, "cache_creation_input_tokens")
-                            + IntVal(usage, "cache_read_input_tokens");
+                        var speed = StringVal(usage, "speed");
+                        if (speed != null)
+                        {
+                            fileFastMode = speed.Equals("fast", StringComparison.OrdinalIgnoreCase);
+                            if ((entryEpoch ?? 0) >= latestFastAt) { latestFastAt = entryEpoch ?? 0; fastMode = fileFastMode; }
+                        }
+                        if (fileFastMode && fileLastUserAt.HasValue)
+                            fastTaskSeq = Math.Max(fastTaskSeq, (long)(fileLastUserAt.Value * 1000));
+                        if (entryEpoch.HasValue && (entryEpoch.Value < todayStart || entryEpoch.Value >= todayEnd)) continue;
+                        var input = IntVal(usage, "input_tokens"); var output = IntVal(usage, "output_tokens");
+                        var split5m = 0; var split1h = 0;
+                        if (TryProp(usage, "cache_creation", out var creation))
+                        { split5m = IntVal(creation, "ephemeral_5m_input_tokens"); split1h = IntVal(creation, "ephemeral_1h_input_tokens"); }
+                        var cache5m = split5m + split1h > 0 ? split5m : IntVal(usage, "cache_creation_input_tokens");
+                        var cacheRead = IntVal(usage, "cache_read_input_tokens");
+                        var id = StringVal(message, "id") ?? StringVal(root, "uuid")
+                            ?? $"{StringVal(root, "timestamp")}:{input}:{output}:{cache5m}:{split1h}:{cacheRead}";
+                        var model = StringVal(message, "model"); if (model == "<synthetic>") model = null;
+                        var explicitCost = DoubleVal(root, "costUSD") ?? DoubleVal(message, "costUSD");
+                        var entry = new ClaudeUsageEntry(input, output, cache5m, split1h, cacheRead, model, fileFastMode, explicitCost);
+                        if (!usageEntries.TryGetValue(id, out var old) || entry.Total > old.Total) usageEntries[id] = entry;
                         if (entryEpoch.HasValue && now - entryEpoch.Value < 5 * 3600)
                         {
                             if (!firstActiveInWindow.HasValue || entryEpoch.Value < firstActiveInWindow.Value)
@@ -408,18 +586,41 @@ sealed class StatusService
             }
         }
 
-        var s = new ClaudeStatus { TokensToday = tokensToday };
+        foreach (var entry in usageEntries.Values)
+        {
+            tokensToday += entry.Total;
+            if (entry.ExplicitCost.HasValue) costToday += entry.ExplicitCost.Value;
+            else if (entry.Model != null && ModelPricing.Shared.Price(entry.Model, entry.Fast) is TokenPrice p)
+                costToday += entry.Input * p.Input + entry.Output * p.Output + entry.Cache5m * p.CacheWrite
+                    + entry.Cache1h * p.CacheWrite1h + entry.CacheRead * p.CachedInput;
+            else if (entry.Total > 0) costComplete = false;
+        }
+        if (!double.IsFinite(costToday)) costComplete = false;
+        lastActivity = Math.Max(lastActivity, lastMtime);
+        var s = new ClaudeStatus
+        {
+            TokensToday = tokensToday, CostToday = costComplete ? costToday : null,
+            CostComplete = costComplete, LastActivityAt = (long)lastActivity,
+            FastMode = fastMode, FastTaskSeq = fastTaskSeq,
+            SessionStartedAt = (long)(firstActiveInWindow ?? 0),
+        };
         if (firstActiveInWindow.HasValue) s.SessionMin = (int)((now - firstActiveInWindow.Value) / 60);
-        s.Status = StatusFromDelta(lastMtime > 0 ? now - lastMtime : 1e9);
+        s.Status = StatusFromDelta(lastActivity > 0 ? now - lastActivity : 1e9);
         return s;
     }
+
+    readonly record struct ClaudeUsageEntry(int Input, int Output, int Cache5m, int Cache1h,
+                                             int CacheRead, string Model, bool Fast, double? ExplicitCost)
+    { public int Total => Input + Output + Cache5m + Cache1h + CacheRead; }
 
     // MARK: - Codex
 
     CodexStatus ReadCodex()
     {
         var now = Now();
-        double lastMtime = 0;
+        var todayStart = TodayStartEpoch(); var todayEnd = TodayEndEpoch();
+        double lastMtime = 0, lastActivity = 0, latestFastAt = 0;
+        var candidates = new List<string>();
 
         // Whole-tree scan just for the freshest mtime (drives working/idle).
         if (Directory.Exists(_codexDir))
@@ -431,6 +632,7 @@ sealed class StatusService
                     var mtime = new DateTimeOffset(File.GetLastWriteTimeUtc(file), TimeSpan.Zero)
                         .ToUnixTimeMilliseconds() / 1000.0;
                     if (mtime > lastMtime) lastMtime = mtime;
+                    if (mtime >= todayStart - 24 * 3600) candidates.Add(file);
                 }
             }
             catch
@@ -439,79 +641,122 @@ sealed class StatusService
             }
         }
 
-        // Tokens + rate limits only from today's day directory.
-        var today = DateTime.Today;
-        var dayDir = Path.Combine(_codexDir, $"{today.Year:D4}", $"{today.Month:D2}", $"{today.Day:D2}");
-
         var tokensToday = 0;
+        var costToday = 0.0; var costComplete = true; var fastMode = false; long fastTaskSeq = 0;
         JsonElement? latestRateLimits = null;
-        JsonDocument latestRateLimitsDoc = null;
         double latestRateLimitsTs = 0;
 
-        if (Directory.Exists(dayDir))
+        foreach (var file in candidates)
         {
-            foreach (var file in Directory.EnumerateFiles(dayDir, "*.jsonl"))
+            var lines = ReadLines(file); if (lines == null) continue;
+            JsonElement? previousTotal = null;
+            var currentModel = ""; var currentPriority = false;
+            foreach (var line in lines)
             {
-                var lines = ReadLines(file);
-                if (lines == null) continue;
-                var sessionMaxTokens = 0;
-                foreach (var line in lines)
+                JsonDocument doc;
+                try { doc = JsonDocument.Parse(line); } catch { continue; }
+                using (doc)
                 {
-                    if (!line.Contains("\"token_count\"")) continue;
-                    JsonDocument doc;
-                    try { doc = JsonDocument.Parse(line); } catch { continue; }
                     var root = doc.RootElement;
-                    if (!TryProp(root, "payload", out var payload)
-                        || StringVal(payload, "type") != "token_count")
+                    if (!TryProp(root, "payload", out var payload)) continue;
+                    var entryEpoch = ParseIso(StringVal(root, "timestamp")) ?? 0;
+                    var outerType = StringVal(root, "type") ?? "";
+                    var type = StringVal(payload, "type") ?? "";
+                    if (outerType == "turn_context")
                     {
-                        doc.Dispose();
+                        currentModel = StringVal(payload, "model") ?? currentModel;
+                        lastActivity = Math.Max(lastActivity, entryEpoch);
                         continue;
                     }
-                    if (TryProp(payload, "info", out var info)
-                        && TryProp(info, "total_token_usage", out var totalUsage))
+                    if (type == "thread_settings_applied")
                     {
-                        var total = IntVal(totalUsage, "total_tokens");
-                        if (total > sessionMaxTokens) sessionMaxTokens = total;
-                    }
-                    if (TryProp(payload, "rate_limits", out var rl))
-                    {
-                        var e = ParseIso(StringVal(root, "timestamp")) ?? 0;
-                        if (e >= latestRateLimitsTs)
+                        if (TryProp(payload, "thread_settings", out var settings))
                         {
-                            latestRateLimitsTs = e;
-                            latestRateLimitsDoc?.Dispose();
-                            latestRateLimitsDoc = doc; // keep doc alive for rl
-                            latestRateLimits = rl;
-                            continue;
+                            var tier = (StringVal(settings, "service_tier") ?? "").ToLowerInvariant();
+                            currentPriority = tier is "fast" or "priority";
+                            if (entryEpoch >= latestFastAt) { latestFastAt = entryEpoch; fastMode = currentPriority; }
+                        }
+                        continue;
+                    }
+                    if (type == "task_started")
+                    {
+                        lastActivity = Math.Max(lastActivity, entryEpoch);
+                        if (currentPriority) fastTaskSeq = Math.Max(fastTaskSeq, (long)(entryEpoch * 1000));
+                        continue;
+                    }
+                    if (type != "token_count") continue;
+                    JsonElement info = default, totalUsage = default;
+                    var hasInfo = TryProp(payload, "info", out info);
+                    var hasTotal = hasInfo && TryProp(info, "total_token_usage", out totalUsage);
+                    if (TryProp(payload, "rate_limits", out var rl)
+                        || (hasInfo && TryProp(info, "rate_limits", out rl)))
+                    {
+                        if (entryEpoch >= latestRateLimitsTs)
+                        {
+                            latestRateLimitsTs = entryEpoch; latestRateLimits = rl.Clone();
                         }
                     }
-                    doc.Dispose();
+                    if (!hasTotal) continue;
+                    if (entryEpoch >= todayStart && entryEpoch < todayEnd)
+                    {
+                        var last = hasInfo && TryProp(info, "last_token_usage", out var lastUsage) ? lastUsage : default;
+                        int Delta(string key) => previousTotal.HasValue
+                            ? Math.Max(0, IntVal(totalUsage, key) - IntVal(previousTotal.Value, key))
+                            : IntVal(last, key);
+                        var total = Delta("total_tokens");
+                        if (total > 0)
+                        {
+                            var input = Delta("input_tokens"); var cached = Delta("cached_input_tokens"); var output = Delta("output_tokens");
+                            tokensToday += total;
+                            if (ModelPricing.Shared.Price(currentModel, currentPriority) is TokenPrice p)
+                                costToday += Math.Max(0, input - cached) * p.Input + cached * p.CachedInput + output * p.Output;
+                            else costComplete = false;
+                        }
+                    }
+                    previousTotal = totalUsage.Clone();
                 }
-                tokensToday += sessionMaxTokens;
             }
         }
 
-        var s = new CodexStatus { TokensToday = tokensToday };
-        s.Status = StatusFromDelta(lastMtime > 0 ? now - lastMtime : 1e9);
+        lastActivity = Math.Max(lastActivity, lastMtime);
+        if (!double.IsFinite(costToday)) costComplete = false;
+        var s = new CodexStatus
+        {
+            TokensToday = tokensToday, CostToday = costComplete ? costToday : null,
+            CostComplete = costComplete, LastActivityAt = (long)lastActivity,
+            FastMode = fastMode, FastTaskSeq = fastTaskSeq,
+        };
+        s.Status = StatusFromDelta(lastActivity > 0 ? now - lastActivity : 1e9);
         if (latestRateLimits.HasValue)
         {
-            var rl = latestRateLimits.Value;
-            if (TryProp(rl, "primary", out var primary))
+            var weekly = CodexWeeklyWindow(latestRateLimits.Value);
+            if (weekly.HasValue)
             {
-                s.PrimaryPct = DoubleVal(primary, "used_percent");
-                s.PrimaryWindowMin = (int?)DoubleVal(primary, "window_minutes");
-                var reset = DoubleVal(primary, "resets_at");
-                if (reset.HasValue) s.PrimaryResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
-            if (TryProp(rl, "secondary", out var secondary))
-            {
-                s.WeeklyPct = DoubleVal(secondary, "used_percent");
-                s.WeeklyWindowMin = (int?)DoubleVal(secondary, "window_minutes");
-                var reset = DoubleVal(secondary, "resets_at");
-                if (reset.HasValue) s.WeeklyResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
+                var w = weekly.Value; s.WeeklyPct = DoubleVal(w, "used_percent");
+                s.WeeklyWindowMin = (int?)DoubleVal(w, "window_minutes");
+                var reset = DoubleVal(w, "resets_at") ?? DoubleVal(w, "reset_at");
+                if (reset.HasValue)
+                {
+                    s.WeeklyResetAt = (long)reset.Value;
+                    s.WeeklyResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
+                }
             }
         }
-        latestRateLimitsDoc?.Dispose();
         return s;
+    }
+
+    static JsonElement? CodexWeeklyWindow(JsonElement limits)
+    {
+        var parsed = new List<(string Name, JsonElement Value, int? Minutes)>();
+        foreach (var name in new[] { "primary", "secondary", "primary_window", "secondary_window" })
+        {
+            if (!TryProp(limits, name, out var value) || !DoubleVal(value, "used_percent").HasValue) continue;
+            parsed.Add((name, value, (int?)DoubleVal(value, "window_minutes")));
+        }
+        var exact = parsed.FirstOrDefault(x => x.Minutes == 7 * 24 * 60);
+        if (exact.Value.ValueKind != JsonValueKind.Undefined) return exact.Value;
+        var secondary = parsed.FirstOrDefault(x => x.Name is "secondary" or "secondary_window");
+        if (secondary.Value.ValueKind != JsonValueKind.Undefined) return secondary.Value;
+        return parsed.Count == 1 && parsed[0].Minutes == null ? parsed[0].Value : null;
     }
 }

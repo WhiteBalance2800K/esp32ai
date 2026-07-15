@@ -15,7 +15,7 @@ class DeviceInfo
     public string Ip = "";
     public string Ssid = "";
     public string Bridge = "";
-    public string Mode = "auto";       // configured: auto | claude | codex | net | music
+    public string Mode = "auto";       // configured: auto | claude | codex | net | music | btc
     public string Effective = "auto";  // what's actually on screen (AUTO may promote to music)
     public string Showing = "";
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
@@ -25,6 +25,8 @@ class DeviceInfo
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
     public int CodexW = 120, CodexH = 120;
+    public int ClaudeDisplayW = 94, ClaudeDisplayH = 102;
+    public int CodexDisplayW = 102, CodexDisplayH = 102;
 }
 
 class DeviceException : Exception
@@ -45,14 +47,14 @@ static class DeviceClient
     public static string Host
     {
         get => Settings.Get(HostKey);
-        set => Settings.Set(HostKey, value);
+        set { if (value != Settings.Get(HostKey)) Settings.Set(HostKey, value); }
     }
 
     /// Last LAN address that polled our /status — i.e. the clock itself.
     public static string LastSeenIp
     {
         get => Settings.Get(LastSeenKey);
-        set => Settings.Set(LastSeenKey, value);
+        set { if (value != Settings.Get(LastSeenKey)) Settings.Set(LastSeenKey, value); }
     }
 
     public static Uri BaseUrl
@@ -107,12 +109,16 @@ static class DeviceClient
                 info.ClaudeCustomSprite = Bool(claude, "custom_sprite");
                 info.ClaudeW = Int(claude, "w", 111);
                 info.ClaudeH = Int(claude, "h", 120);
+                info.ClaudeDisplayW = Int(claude, "display_w", (int)Math.Round(info.ClaudeW * .85));
+                info.ClaudeDisplayH = Int(claude, "display_h", (int)Math.Round(info.ClaudeH * .85));
             }
             if (root.TryGetProperty("codex", out var codex))
             {
                 info.CodexCustomSprite = Bool(codex, "custom_sprite");
                 info.CodexW = Int(codex, "w", 120);
                 info.CodexH = Int(codex, "h", 120);
+                info.CodexDisplayW = Int(codex, "display_w", (int)Math.Round(info.CodexW * .85));
+                info.CodexDisplayH = Int(codex, "display_h", (int)Math.Round(info.CodexH * .85));
             }
             return info;
         }
