@@ -66,16 +66,29 @@ private func decodeCover(_ data: Data, w: Int, h: Int) -> CGImage? {
 
 // MARK: - the 240x240 replica view
 
+enum QuotaBorderLevel: Equatable {
+    case green, yellow, red
+}
+
+func codexWeeklyBorderLevel(_ pct: Double?) -> QuotaBorderLevel {
+    guard let pct else { return .green }
+    if pct >= 75 { return .red }
+    if pct >= 50 { return .yellow }
+    return .green
+}
+
 final class MirrorView: NSView {
     // scene state, all in the device's 240x240 logical coordinates
     var frames: [CGImage] = []
     var frameIdx = 0
     var spriteW = 120, spriteH = 120
     var ringPct: Double = 0
+    var ringLevel: QuotaBorderLevel = .green
     var needsInput = false // shown app waiting on approval -> red border flash
     var flashOn = false
     var line1 = "5h -"
     var line2 = "Weekly -"
+    var dailyLine = "TODAY 0  ~$0.00"
     var showingClaude = true
     var deviceOK = false
     // net-mode mirror: same scrolling area-chart model as the firmware —
@@ -115,6 +128,9 @@ final class MirrorView: NSView {
     var musicDuration: Double = 0
     var musicPlaying = false
     var musicCover: CGImage?
+    var btcMode = false
+    var btcFrame: CGImage?
+    var ludicrousProgress: Double? = nil
 
     private static let claudeLogo = Bundle.aiClockResources.image(forResource: "claude-logo")
     private static let codexLogo = Bundle.aiClockResources.image(forResource: "codex-logo")
@@ -134,6 +150,22 @@ final class MirrorView: NSView {
         panel.fill()
         panel.addClip()
 
+        if let progress = ludicrousProgress {
+            drawLudicrous(ctx, progress: progress)
+            ctx.restoreGState()
+            return
+        }
+        if btcMode {
+            if let btcFrame {
+                ctx.saveGState()
+                ctx.translateBy(x: 0, y: 240)
+                ctx.scaleBy(x: 1, y: -1)
+                ctx.draw(btcFrame, in: CGRect(x: 0, y: 0, width: 240, height: 240))
+                ctx.restoreGState()
+            }
+            ctx.restoreGState()
+            return
+        }
         if netMode {
             drawNetScene(ctx)
             ctx.restoreGState()
@@ -148,8 +180,13 @@ final class MirrorView: NSView {
         // square quota ring: margin 4, thickness 10, clockwise from top-left
         let m: CGFloat = 4, t: CGFloat = 10
         let side: CGFloat = 240 - 2 * m
-        let color = deviceOK ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
-                             : NSColor.darkGray
+        let activeColor: NSColor
+        switch ringLevel {
+        case .green: activeColor = NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
+        case .yellow: activeColor = .systemYellow
+        case .red: activeColor = .systemRed
+        }
+        let color = deviceOK ? activeColor : NSColor.darkGray
         color.setFill()
         var remaining = side * 4 * CGFloat(max(0, min(ringPct, 100)) / 100)
         let x0 = m, y0 = m, x1 = 240 - m
@@ -165,10 +202,10 @@ final class MirrorView: NSView {
         seg = min(remaining, side)
         if seg > 0 { NSRect(x: x0, y: 240 - m - seg, width: t, height: seg).fill() }     // left
 
-        // sprite, centered, pixel-crisp
+        // sprite, upper-right, pixel-crisp (matches firmware coordinates)
         if !frames.isEmpty {
             let img = frames[min(frameIdx, frames.count - 1)]
-            let rect = CGRect(x: 120 - spriteW / 2, y: 120 - spriteH / 2,
+            let rect = CGRect(x: 224 - spriteW, y: 18,
                               width: spriteW, height: spriteH)
             ctx.saveGState()
             ctx.interpolationQuality = .none
@@ -195,6 +232,10 @@ final class MirrorView: NSView {
         ]
         (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 18), withAttributes: attrs)
         (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 240, height: 18), withAttributes: attrs)
+        (dailyLine as NSString).draw(in: NSRect(x: 0, y: 164, width: 240, height: 20), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 16, weight: .medium),
+            .foregroundColor: NSColor(white: 0.68, alpha: 1), .paragraphStyle: style,
+        ])
 
         if !deviceOK {
             let overlay: [NSAttributedString.Key: Any] = [
@@ -216,6 +257,41 @@ final class MirrorView: NSView {
             NSRect(x: 240 - m - t, y: m, width: t, height: side).fill()
         }
         ctx.restoreGState()
+    }
+
+    private func drawLudicrous(_ ctx: CGContext, progress p: Double) {
+        let pulse = CGFloat(sin(min(1, p) * .pi))
+        let cx: CGFloat = 120, cy: CGFloat = 120
+        ctx.setStrokeColor(NSColor(white: 0.78, alpha: 0.75).cgColor)
+        ctx.setLineWidth(1)
+        for i in 0..<14 {
+            let a = CGFloat(i) / 14 * .pi * 2 + CGFloat(p) * 0.45
+            let inner = 12 + CGFloat(p) * 45
+            let outer = 34 + CGFloat(p) * 190
+            ctx.move(to: CGPoint(x: cx + cos(a) * inner, y: cy + sin(a) * inner))
+            ctx.addLine(to: CGPoint(x: cx + cos(a) * outer, y: cy + sin(a) * outer))
+        }
+        ctx.strokePath()
+        ctx.setStrokeColor(NSColor.systemRed.withAlphaComponent(0.9).cgColor)
+        ctx.setLineWidth(2)
+        for ring in 0..<3 {
+            let radius = (CGFloat(p) * 150 + CGFloat(ring) * 28).truncatingRemainder(dividingBy: 170)
+            ctx.strokeEllipse(in: CGRect(x: cx - radius, y: cy - radius, width: radius * 2, height: radius * 2))
+        }
+        ctx.setFillColor(NSColor.white.withAlphaComponent(0.7).cgColor)
+        for i in 0..<34 {
+            let seed = CGFloat((i * 47) % 101) / 101
+            let a = CGFloat(i * 29) * .pi / 90
+            let d = 18 + (seed + CGFloat(p)) * 145
+            let r = 0.5 + pulse * 1.6
+            ctx.fillEllipse(in: CGRect(x: cx + cos(a) * d - r, y: cy + sin(a) * d - r,
+                                       width: r * 2, height: r * 2))
+        }
+        let style = NSMutableParagraphStyle(); style.alignment = .center
+        ("LUDICROUS  +" as NSString).draw(in: NSRect(x: 0, y: 105, width: 240, height: 24), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 16, weight: .bold),
+            .foregroundColor: NSColor.white, .paragraphStyle: style,
+        ])
     }
 
     private func drawMusicScene(_ ctx: CGContext) {
@@ -386,9 +462,10 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let service: StatusService
     private let netMonitor: NetSpeedMonitor
     private let nowPlaying: NowPlayingMonitor
+    private let market: MarketMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐"],
+    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐", "行情"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
@@ -402,14 +479,16 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var pollTimer: Timer?
     private var animTimer: Timer?
     private var sweepTimer: Timer?
-    private var spriteCache: [String: (rev: Int, frames: [CGImage], w: Int, h: Int)] = [:]
+    private var spriteCache: [String: (rev: Int, frames: [CGImage], w: Int, h: Int, drawW: Int, drawH: Int)] = [:]
     private var lastInfo: DeviceInfo?
     private var fetchingSlot: String?
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor) {
+    init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor,
+         market: MarketMonitor) {
         self.service = service
         self.netMonitor = netMonitor
         self.nowPlaying = nowPlaying
+        self.market = market
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -542,12 +621,14 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.applyScene(info)
                 self.ensureSprite(info)
                 self.syncBrightness(info)
-                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4][info.mode] ?? 0
+                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4, "btc": 5][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
-                    : info.mode == "music" ? "音乐播放" : "固定显示"
-                self.statusLabel.stringValue = "\(info.ip) · \(modeText) · 数据 \(info.bridge)"
+                    : info.mode == "music" ? "音乐播放"
+                    : info.mode == "btc" ? "行情" : "固定显示"
+                let endpoint = info.wired ? "USB 串口" : info.ip
+                self.statusLabel.stringValue = "\(endpoint) · \(modeText) · 数据 \(info.bridge)"
             case .failure:
                 self.mirror.deviceOK = false
                 self.mirror.needsDisplay = true
@@ -568,11 +649,19 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     /// Quota lines & ring exactly as the firmware computes them from /status.
     private func applyScene(_ info: DeviceInfo) {
+        let snap = service.snapshot()
+        updateFastAnimation(info: info, snapshot: snap)
         // mirror what's actually on the device screen (effective), so an
         // AUTO device that auto-switched to music shows music here too
         let enteringNet = info.effective == "net" && !mirror.netMode
         mirror.netMode = info.effective == "net"
         mirror.musicMode = info.effective == "music"
+        mirror.btcMode = info.effective == "btc"
+        if mirror.btcMode {
+            mirror.btcFrame = decodeCover(market.frameRGB565, w: 240, h: 240)
+            mirror.needsDisplay = true
+            return
+        }
         if mirror.netMode {
             if enteringNet { mirror.resetNetSweep() } // fresh sweep, like the device's chrome reset
             mirror.needsDisplay = true
@@ -589,21 +678,24 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.needsDisplay = true
             return
         }
-        let snap = service.snapshot()
         mirror.showingClaude = info.showing != "codex"
         if mirror.showingClaude {
             let pct = snap.claude.fiveHourPct
                 ?? (snap.claude.sessionWindowMin > 0
                     ? 100.0 * Double(snap.claude.sessionMin) / Double(snap.claude.sessionWindowMin) : 0)
             mirror.ringPct = pct
+            mirror.ringLevel = .green
             mirror.line1 = "5h " + Self.pctText(pct)
             mirror.line2 = "Weekly " + Self.pctText(snap.claude.sevenDayPct)
             mirror.needsInput = snap.claude.needsInput
+            mirror.dailyLine = Self.dailyLine(tokens: snap.claude.tokensToday, cost: snap.claude.costToday)
         } else {
-            mirror.ringPct = snap.codex.primaryPct ?? 0
-            mirror.line1 = "5h " + Self.pctText(snap.codex.primaryPct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+            mirror.ringPct = snap.codex.weeklyPct ?? 0
+            mirror.ringLevel = codexWeeklyBorderLevel(snap.codex.weeklyPct)
+            mirror.line1 = "Weekly"
+            mirror.line2 = Self.pctText(snap.codex.weeklyPct)
             mirror.needsInput = snap.codex.needsInput
+            mirror.dailyLine = Self.dailyLine(tokens: snap.codex.tokensToday, cost: snap.codex.costToday)
         }
         mirror.needsDisplay = true
     }
@@ -613,14 +705,24 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         return "\(Int(p))%"
     }
 
+    private static func dailyLine(tokens: Int, cost: Double?) -> String {
+        let tokenText: String
+        if tokens >= 1_000_000 { tokenText = String(format: "%.1fM", Double(tokens) / 1_000_000) }
+        else if tokens >= 1_000 { tokenText = String(format: "%.1fK", Double(tokens) / 1_000) }
+        else { tokenText = String(tokens) }
+        return "TODAY \(tokenText)  ~\(cost.map { String(format: "$%.2f", $0) } ?? "$?")"
+    }
+
     private func ensureSprite(_ info: DeviceInfo) {
         let slot = info.showing == "codex" ? "codex" : "claude"
         let w = slot == "claude" ? info.claudeW : info.codexW
         let h = slot == "claude" ? info.claudeH : info.codexH
+        let drawW = slot == "claude" ? info.claudeDisplayW : info.codexDisplayW
+        let drawH = slot == "claude" ? info.claudeDisplayH : info.codexDisplayH
         if let cached = spriteCache[slot], cached.rev == info.spriteRev {
             mirror.frames = cached.frames
-            mirror.spriteW = cached.w
-            mirror.spriteH = cached.h
+            mirror.spriteW = cached.drawW
+            mirror.spriteH = cached.drawH
             return
         }
         guard fetchingSlot != slot else { return }
@@ -631,11 +733,11 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             if case let .success(data) = result {
                 let frames = decodeSpriteFrames(data, w: w, h: h)
                 guard !frames.isEmpty else { return }
-                self.spriteCache[slot] = (info.spriteRev, frames, w, h)
+                self.spriteCache[slot] = (info.spriteRev, frames, w, h, drawW, drawH)
                 if (self.lastInfo?.showing == "codex" ? "codex" : "claude") == slot {
                     self.mirror.frames = frames
-                    self.mirror.spriteW = w
-                    self.mirror.spriteH = h
+                    self.mirror.spriteW = drawW
+                    self.mirror.spriteH = drawH
                     self.mirror.needsDisplay = true
                 }
             }
@@ -643,9 +745,35 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     private var flashCounter = 0
+    private var baselineFastSeq: [String: Int64] = [:]
+    private var ludicrousStartedAt: Date?
+
+    private func updateFastAnimation(info: DeviceInfo, snapshot: Snapshot) {
+        let agent = info.showing == "codex" ? "codex" : "claude"
+        let sequences = ["claude": snapshot.claude.fastTaskSeq, "codex": snapshot.codex.fastTaskSeq]
+        guard !baselineFastSeq.isEmpty else { baselineFastSeq = sequences; return }
+        let seq = sequences[agent] ?? 0
+        let previous = baselineFastSeq[agent] ?? seq
+        baselineFastSeq = sequences
+        if seq > previous, info.effective != "net", info.effective != "music", info.effective != "btc" {
+            ludicrousStartedAt = Date()
+            mirror.ludicrousProgress = 0
+        }
+    }
 
     private func animTick() {
         guard let info = lastInfo, !mirror.netMode else { return }
+        if let started = ludicrousStartedAt {
+            let progress = Date().timeIntervalSince(started) / 2.4
+            if progress >= 1 {
+                ludicrousStartedAt = nil
+                mirror.ludicrousProgress = nil
+            } else {
+                mirror.ludicrousProgress = progress
+            }
+            mirror.needsDisplay = true
+            return
+        }
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if mirror.needsInput {
@@ -673,7 +801,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "net", "music"][max(0, modeControl.selectedSegment)]
+        let mode = ["auto", "claude", "codex", "net", "music", "btc"][max(0, modeControl.selectedSegment)]
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }

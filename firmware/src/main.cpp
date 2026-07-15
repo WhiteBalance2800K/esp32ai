@@ -33,10 +33,16 @@ static_assert(TFT_SCLK == 3 && TFT_MOSI == 5 && TFT_MISO == 5 && TFT_DC == 2 && 
 #endif
 
 #include "config.h"
+#include "setup_font_zh.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
 #include "img/claude_logo.h"
 #include "img/codex_logo.h"
+
+const int CLAUDE_DISPLAY_W = (CLAUDE_SPRITE_W * CLAUDE_DISPLAY_PERCENT + 50) / 100;
+const int CLAUDE_DISPLAY_H = (CLAUDE_SPRITE_H * CLAUDE_DISPLAY_PERCENT + 50) / 100;
+const int CODEX_DISPLAY_W = (CODEX_SPRITE_W * CODEX_DISPLAY_PERCENT + 50) / 100;
+const int CODEX_DISPLAY_H = (CODEX_SPRITE_H * CODEX_DISPLAY_PERCENT + 50) / 100;
 
 TFT_eSPI tft = TFT_eSPI();
 #if defined(ESP32)
@@ -84,7 +90,6 @@ const int RING_THICKNESS = 10;  // ring bar thickness
 const unsigned long ANIM_INTERVAL_MS = 120;  // sprite frame advance
 const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
 const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fast
-const unsigned long SWITCH_IDLE_MS = 6000;   // neither working: alternate slow
 
 enum ActiveApp { APP_CLAUDE, APP_CODEX };
 ActiveApp currentApp = APP_CLAUDE;
@@ -93,7 +98,7 @@ unsigned long lastSwitchMs = 0;
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
 // net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC };
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC, MODE_BTC };
 DisplayMode displayMode = MODE_AUTO;
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
@@ -147,6 +152,32 @@ bool musicHasArtwork = false;
 bool musicChromeDrawn = false;
 unsigned long lastMusicPollMs = 0;
 
+// ---------- BTC/USD full-frame mode ----------
+// The bridge rotates the selected market every 10 seconds; poll at the same
+// cadence so the device never skips a favorite.
+const unsigned long BTC_POLL_INTERVAL_MS = 10000;
+unsigned long lastBtcPollMs = 0;
+const size_t BTC_FRAME_HEADER_BYTES = 8; // uint64 big-endian version
+const int BTC_FRAME_CHUNK_ROWS = 4;      // 4 rows = 1920 bytes per network read
+const unsigned long BTC_VERSION_HTTP_TIMEOUT_MS = 1500;
+const unsigned long BTC_FRAME_HTTP_TIMEOUT_MS = 2500;
+const unsigned long BTC_FRAME_READ_TIMEOUT_MS = 1200;
+const unsigned long BTC_FRAME_TOTAL_TIMEOUT_MS = 5000;
+uint64_t lastBtcFrameVersion = 0;
+uint16_t btcChunkPixels[SCREEN_W * BTC_FRAME_CHUNK_ROWS];
+
+// ---------- Fast/Priority task ignition ----------
+bool ludicrousActive = false;
+bool claudeLudicrousPending = false;
+bool codexLudicrousPending = false;
+ActiveApp ludicrousApp = APP_CLAUDE;
+unsigned long ludicrousStartMs = 0;
+unsigned long lastLudicrousFrameMs = 0;
+uint64_t lastClaudeFastTaskSeq = 0;
+uint64_t lastCodexFastTaskSeq = 0;
+bool claudeFastSeqInitialized = false;
+bool codexFastSeqInitialized = false;
+
 int claudeFrame = 0;
 int codexFrame = 0;
 unsigned long lastAnimMs = 0;
@@ -168,26 +199,43 @@ struct ClaudeStatus {
   float sevenDayPct = -1;
   int sevenDayResetMin = -1; // minutes until the 7-day window resets
   bool needsInput = false; // waiting on a permission/approval prompt
+  float costToday = -1;
+  uint64_t lastActivityAt = 0;
+  bool fastMode = false;
+  uint64_t fastTaskSeq = 0;
 };
 
 struct CodexStatus {
   String status = "unknown";
   long tokensToday = 0;
-  float primaryPct = -1;
-  int primaryResetMin = -1;
   float weeklyPct = -1;
   int weeklyResetMin = -1;
   bool needsInput = false;
+  float costToday = -1;
+  uint64_t lastActivityAt = 0;
+  bool fastMode = false;
+  uint64_t fastTaskSeq = 0;
 };
 
 ClaudeStatus claudeStatus;
 CodexStatus codexStatus;
+ActiveApp preferredApp = APP_CODEX;
+DisplayMode effectiveMode();
+const char *displayModeName(DisplayMode m);
 
 unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
 bool mainUiShown = false;      // false while the config-portal screen is up
 bool webServerStarted = false; // deferred: port 80 clashes with the portal
+
+// Wi-FiManager owns the first-time portal, but it does not guarantee that a
+// later STA link loss will recover on every ESP32-C3/route combination. Keep
+// a small watchdog here so the HTTP API and bridge polling come back after an
+// AP roam or a transient DHCP/radio failure.
+const unsigned long WIFI_RECONNECT_INTERVAL_MS = 10000;
+unsigned long lastWifiReconnectMs = 0;
+bool wifiWasConnected = false;
 
 // ---------- backlight brightness ----------
 // The panel backlight (TFT_BL, active LOW) is PWM-dimmable — the vendor's own
@@ -286,27 +334,40 @@ void loadCustomSpriteState() {
 int claudeFrameCount() { return claudeCustom ? claudeCustomFrames : CLAUDE_SPRITE_FRAMES; }
 int codexFrameCount() { return codexCustom ? codexCustomFrames : CODEX_SPRITE_FRAMES; }
 
-// Draws one sprite frame centered on screen, one row at a time so we never
+// Draws one sprite frame in the upper-right, one row at a time so we never
 // need a full-frame buffer: each row comes either from the custom LittleFS
 // file (streamed) or the compiled-in PROGMEM default (copied row-by-row).
 void drawSpriteFrame(bool custom, const char *file, const uint16_t *const *progmemFrames, int frameIdx, int w,
-                     int h, size_t frameBytes) {
-  int x0 = SCREEN_CX - w / 2, y0 = SCREEN_CY - h / 2;
+                     int h, size_t frameBytes, int drawW, int drawH) {
+  // Keep a two-pixel breathing room from the inside edge of the 10px ring.
+  // The logo remains at the upper-left, so both pets can share this chrome.
+  int x0 = SCREEN_W - RING_MARGIN - RING_THICKNESS - drawW - 2;
+  int y0 = 18;
   size_t rowBytes = (size_t)w * 2;
   if (custom) {
     File f = LittleFS.open(file, "r");
     if (!f) return;
-    f.seek(1 + (size_t)frameIdx * frameBytes);
-    for (int r = 0; r < h; r++) {
+    for (int r = 0; r < drawH; r++) {
+      int srcY = min(h - 1, (r * h) / drawH);
+      f.seek(1 + (size_t)frameIdx * frameBytes + (size_t)srcY * rowBytes);
       f.read((uint8_t *)rowBuf, rowBytes);
-      tft.pushImage(x0, y0 + r, w, 1, rowBuf);
+      for (int x = 0; x < drawW; x++) {
+        int srcX = min(w - 1, (x * w) / drawW);
+        prevRowBuf[x] = rowBuf[srcX];
+      }
+      tft.pushImage(x0, y0 + r, drawW, 1, prevRowBuf);
     }
     f.close();
   } else {
     const uint16_t *frame = progmemFrames[frameIdx];
-    for (int r = 0; r < h; r++) {
-      memcpy_P(rowBuf, frame + (size_t)r * w, rowBytes);
-      tft.pushImage(x0, y0 + r, w, 1, rowBuf);
+    for (int r = 0; r < drawH; r++) {
+      int srcY = min(h - 1, (r * h) / drawH);
+      memcpy_P(rowBuf, frame + (size_t)srcY * w, rowBytes);
+      for (int x = 0; x < drawW; x++) {
+        int srcX = min(w - 1, (x * w) / drawW);
+        prevRowBuf[x] = rowBuf[srcX];
+      }
+      tft.pushImage(x0, y0 + r, drawW, 1, prevRowBuf);
     }
   }
 }
@@ -346,11 +407,18 @@ bool currentAppNeedsInput() {
   return currentApp == APP_CLAUDE ? claudeStatus.needsInput : codexStatus.needsInput;
 }
 
-// Working vs idle is now conveyed by the sprite animation itself (moving vs
-// still), not by ring color. The ring just stays steady green, except
-// bridge-stale which flashes red ("check it now") and overrides everything.
+uint16_t codexWeeklyColor(float pct) {
+  if (pct >= 75.0f) return TFT_RED;
+  if (pct >= 50.0f) return TFT_YELLOW;
+  return TFT_GREEN;
+}
+
+// Working vs idle is conveyed by sprite animation. Claude keeps a green quota
+// ring; Codex uses its weekly percentage for both ring progress and severity.
+// Bridge-stale flashing red still overrides either app.
 uint16_t currentStatusColor() {
   if (bridgeStale()) return flashOn ? TFT_RED : TFT_BLACK;
+  if (currentApp == APP_CODEX) return codexWeeklyColor(codexStatus.weeklyPct);
   return TFT_GREEN;
 }
 
@@ -420,24 +488,25 @@ void drawSquareRing(float pct, uint16_t color) {
 
 void drawClaudeSprite(int frameIdx) {
   drawSpriteFrame(claudeCustom, CLAUDE_SPRITE_FILE, claude_sprite_frames, frameIdx, CLAUDE_SPRITE_W,
-                  CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES);
+                  CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES, CLAUDE_DISPLAY_W, CLAUDE_DISPLAY_H);
 }
 
 void drawCodexSprite(int frameIdx) {
   drawSpriteFrame(codexCustom, CODEX_SPRITE_FILE, codex_sprite_frames, frameIdx, CODEX_SPRITE_W, CODEX_SPRITE_H,
-                  CODEX_FRAME_BYTES);
+                  CODEX_FRAME_BYTES, CODEX_DISPLAY_W, CODEX_DISPLAY_H);
 }
 
 String pctText(float pct) {
   return pct >= 0 ? String((int)pct) + "%" : "-";
 }
 
-// Quota readout below the sprite: two columns ("5h" / "Wk"), small grey label
-// over a big font-4 percentage. Values repaint only when their text changes
-// (force = after a full-screen clear), so the 5s poll never flashes them.
+// Claude quota readout below the sprite: two columns ("5h" / "Wk"), small
+// grey labels over big font-4 percentages. Values repaint only when their text
+// changes (force = after a full-screen clear), so the 5s poll never flashes.
 const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
 const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
 String lastQuota5h, lastQuotaWk;
+String lastDailyUsage;
 
 // Faux-bold: the packed TFT_eSPI fonts have no bold face, so draw twice with
 // a 1px x offset. Transparent draws - the caller must have cleared the region.
@@ -466,21 +535,39 @@ void drawQuotaText(float hourPct, float weekPct, bool force) {
   }
 }
 
+// Codex intentionally shows only the weekly limit. Its 5h window is neither
+// parsed by the bridge nor rendered here.
+void drawCodexQuotaText(float weekPct, bool force) {
+  tft.setTextDatum(TC_DATUM);
+  if (force) drawBoldString("Weekly", SCREEN_CX, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+  String value = pctText(weekPct);
+  if (force || value != lastQuotaWk) {
+    lastQuotaWk = value;
+    tft.fillRect(SCREEN_CX - 60, QUOTA_VALUE_Y, 120, 26, TFT_BLACK);
+    drawBoldString(value, SCREEN_CX, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  }
+}
+
+void drawDailyUsage(long tokens, float cost, bool force) {
+  String line = "TODAY " + formatTokens(tokens) + "  ~" + (cost >= 0 ? "$" + String(cost, 2) : "$?");
+  if (!force && line == lastDailyUsage) return;
+  lastDailyUsage = line;
+  tft.fillRect(0, 163, SCREEN_W, 22, TFT_BLACK);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString(line, SCREEN_CX, 166, 2);
+}
+
 // ---------- quota-exhausted countdown ----------
-// When the current app's 5h or weekly window is used up, the pet is replaced
-// by a countdown to that window's reset (bridge sends minutes-until-reset).
-// A spent weekly window blocks usage even after the 5h one resets, so the
-// weekly countdown takes priority when both are exhausted.
+// When the current app's relevant window is used up, the pet is replaced by a
+// countdown to that window's reset. Claude has 5h/weekly windows; Codex only
+// has weekly. A spent weekly window deliberately has priority.
 
 enum CdType { CD_NONE, CD_5H, CD_WEEK };
 
-float currentHourPct() {
-  return currentApp == APP_CLAUDE ? claudeStatus.fiveHourPct : codexStatus.primaryPct;
-}
+float currentHourPct() { return claudeStatus.fiveHourPct; }
 
-int currentHourResetMin() {
-  return currentApp == APP_CLAUDE ? claudeStatus.fiveHourResetMin : codexStatus.primaryResetMin;
-}
+int currentHourResetMin() { return claudeStatus.fiveHourResetMin; }
 
 float currentWeekPct() {
   return currentApp == APP_CLAUDE ? claudeStatus.sevenDayPct : codexStatus.weeklyPct;
@@ -492,7 +579,7 @@ int currentWeekResetMin() {
 
 CdType desiredCountdown() {
   if (currentWeekPct() >= 99.9f && currentWeekResetMin() >= 0) return CD_WEEK;
-  if (currentHourPct() >= 99.9f && currentHourResetMin() >= 0) return CD_5H;
+  if (currentApp == APP_CLAUDE && currentHourPct() >= 99.9f && currentHourResetMin() >= 0) return CD_5H;
   return CD_NONE;
 }
 
@@ -589,10 +676,12 @@ void drawActiveApp() {
     drawSquareRing(claudeRingPct(), currentStatusColor());
     if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame);
     drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, true);
+    drawDailyUsage(claudeStatus.tokensToday, claudeStatus.costToday, true);
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawSquareRing(max(codexStatus.weeklyPct, 0.0f), currentStatusColor());
     if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, true);
+    drawCodexQuotaText(codexStatus.weeklyPct, true);
+    drawDailyUsage(codexStatus.tokensToday, codexStatus.costToday, true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
@@ -608,9 +697,11 @@ void refreshActiveApp() {
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
     drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
+    drawDailyUsage(claudeStatus.tokensToday, claudeStatus.costToday, false);
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, false);
+    drawSquareRing(max(codexStatus.weeklyPct, 0.0f), currentStatusColor());
+    drawCodexQuotaText(codexStatus.weeklyPct, false);
+    drawDailyUsage(codexStatus.tokensToday, codexStatus.costToday, false);
   }
   if (showingCd != CD_NONE) {
     syncCountdownDeadline();
@@ -624,7 +715,7 @@ void redrawRingOnly() {
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawSquareRing(max(codexStatus.weeklyPct, 0.0f), currentStatusColor());
   }
 }
 
@@ -632,7 +723,7 @@ void redrawRingOnly() {
 //   - display mode pinned (Mac app) -> that app, always
 //   - exactly one app working       -> that app, immediately
 //   - both working                  -> alternate every SWITCH_BOTH_MS (2s)
-//   - neither working               -> alternate slowly (SWITCH_IDLE_MS)
+//   - neither working               -> keep the most recently active app
 bool updateActiveApp() {
   ActiveApp desired = currentApp;
 
@@ -651,12 +742,13 @@ bool updateActiveApp() {
       desired = APP_CLAUDE;
     } else if (codexWorking && !claudeWorking) {
       desired = APP_CODEX;
-    } else {
-      unsigned long interval = (claudeWorking && codexWorking) ? SWITCH_BOTH_MS : SWITCH_IDLE_MS;
-      if (millis() - lastSwitchMs >= interval) {
+    } else if (claudeWorking && codexWorking) {
+      if (millis() - lastSwitchMs >= SWITCH_BOTH_MS) {
         lastSwitchMs = millis();
         desired = (currentApp == APP_CLAUDE) ? APP_CODEX : APP_CLAUDE;
       }
+    } else {
+      desired = preferredApp;
     }
   }
 
@@ -1074,25 +1166,264 @@ void pollMusic() {
   http.end();
 }
 
+bool readBtcExact(WiFiClient *stream, uint8_t *dst, size_t length, unsigned long timeoutMs) {
+  size_t received = 0;
+  unsigned long deadline = millis() + timeoutMs;
+  while (received < length) {
+    int available = stream->available();
+    if (available > 0) {
+      size_t want = min((size_t)available, length - received);
+      int got = stream->read(dst + received, want);
+      if (got > 0) {
+        received += (size_t)got;
+        continue;
+      }
+    }
+    if ((long)(millis() - deadline) >= 0) return false;
+    delay(1);
+    yield();
+  }
+  return true;
+}
+
+bool pollBtcFrame(uint64_t expectedVersion) {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
+  WiFiClient client;
+  client.setTimeout(BTC_FRAME_READ_TIMEOUT_MS);
+  HTTPClient http;
+  String url = "http://" + bridgeHost + "/btc/frame.raw";
+  http.setTimeout(BTC_FRAME_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, url)) return false;
+  int code = http.GET();
+  const int expectedSize = (int)(BTC_FRAME_HEADER_BYTES + SCREEN_W * SCREEN_H * 2);
+  if (code != HTTP_CODE_OK || http.getSize() != expectedSize) {
+    Serial.printf("[btc] frame GET -> %d size=%d expected=%d\n", code, http.getSize(), expectedSize);
+    http.end();
+    return false;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  uint8_t header[BTC_FRAME_HEADER_BYTES];
+  if (!readBtcExact(stream, header, sizeof(header), BTC_FRAME_READ_TIMEOUT_MS)) {
+    Serial.println("[btc] frame version header timeout");
+    http.end();
+    return false;
+  }
+  uint64_t version = 0;
+  for (size_t i = 0; i < sizeof(header); i++) version = (version << 8) | header[i];
+  if (version != expectedVersion || version <= lastBtcFrameVersion) {
+    Serial.printf("[btc] skip frame version=%llu expected=%llu last=%llu\n",
+                  (unsigned long long)version, (unsigned long long)expectedVersion,
+                  (unsigned long long)lastBtcFrameVersion);
+    http.end();
+    return false;
+  }
+
+  const size_t rowBytes = (size_t)SCREEN_W * 2;
+  unsigned long frameDeadline = millis() + BTC_FRAME_TOTAL_TIMEOUT_MS;
+  bool ok = true;
+  for (int y = 0; y < SCREEN_H; y += BTC_FRAME_CHUNK_ROWS) {
+    int rows = min(BTC_FRAME_CHUNK_ROWS, SCREEN_H - y);
+    size_t bytes = (size_t)rows * rowBytes;
+    long remaining = (long)(frameDeadline - millis());
+    if (remaining <= 0 ||
+        !readBtcExact(stream, (uint8_t *)btcChunkPixels, bytes,
+                      min((unsigned long)remaining, BTC_FRAME_READ_TIMEOUT_MS))) {
+      Serial.printf("[btc] frame chunk timeout at row %d\n", y);
+      ok = false;
+      break;
+    }
+    // Four rows per push reduces SPI command overhead from 240 transactions
+    // to 60 while preserving the panel's RGB565 byte order.
+    tft.pushImage(0, y, SCREEN_W, rows, btcChunkPixels);
+    yield();
+  }
+  http.end();
+  if (ok) {
+    lastBtcFrameVersion = version;
+    Serial.printf("[btc] frame applied version=%llu\n", (unsigned long long)version);
+  }
+  return ok;
+}
+
+void pollBtc() {
+  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
+  WiFiClient client;
+  HTTPClient http;
+  String url = "http://" + bridgeHost + "/btc/version";
+  http.setTimeout(BTC_VERSION_HTTP_TIMEOUT_MS);
+  if (!http.begin(client, url)) return;
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[btc] version GET -> %d\n", code);
+    http.end();
+    return;
+  }
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getString());
+  http.end();
+  if (err) {
+    Serial.println("[btc] version JSON parse failed");
+    return;
+  }
+  uint64_t version = doc["version"] | (uint64_t)0;
+  if (version == 0 || version <= lastBtcFrameVersion) return;
+  pollBtcFrame(version);
+}
+
+void drawLudicrousFrame(float p) {
+  tft.fillScreen(TFT_BLACK);
+  int cx = SCREEN_CX, cy = SCREEN_CY;
+  uint16_t silver = tft.color565(190, 195, 205);
+  for (int i = 0; i < 14; i++) {
+    float a = i * 6.2831853f / 14.0f + p * 0.45f;
+    float inner = 12 + p * 45;
+    float outer = 34 + p * 190;
+    tft.drawLine(cx + cosf(a) * inner, cy + sinf(a) * inner,
+                 cx + cosf(a) * outer, cy + sinf(a) * outer, silver);
+  }
+  for (int ring = 0; ring < 3; ring++) {
+    int radius = ((int)(p * 150) + ring * 28) % 170;
+    if (radius > 1) tft.drawCircle(cx, cy, radius, TFT_RED);
+  }
+  for (int i = 0; i < 34; i++) {
+    float seed = ((i * 47) % 101) / 101.0f;
+    float a = i * 29 * 3.1415926f / 90.0f;
+    float d = 18 + (seed + p) * 145;
+    int x = cx + cosf(a) * d, y = cy + sinf(a) * d;
+    if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H) tft.fillCircle(x, y, 1, TFT_WHITE);
+  }
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_WHITE);
+  tft.drawString("LUDICROUS +", cx, cy, 2);
+}
+
+void startPendingLudicrous() {
+  if (!claudeLudicrousPending && !codexLudicrousPending) return;
+  DisplayMode eff = effectiveMode();
+  if (eff == MODE_NET || eff == MODE_MUSIC || eff == MODE_BTC) {
+    claudeLudicrousPending = codexLudicrousPending = false;
+    return;
+  }
+  if (displayMode == MODE_CLAUDE) {
+    codexLudicrousPending = false;
+    if (!claudeLudicrousPending) return;
+    ludicrousApp = APP_CLAUDE;
+  } else if (displayMode == MODE_CODEX) {
+    claudeLudicrousPending = false;
+    if (!codexLudicrousPending) return;
+    ludicrousApp = APP_CODEX;
+  } else if (preferredApp == APP_CLAUDE && claudeLudicrousPending) {
+    ludicrousApp = APP_CLAUDE;
+  } else if (codexLudicrousPending) {
+    ludicrousApp = APP_CODEX;
+  } else {
+    ludicrousApp = APP_CLAUDE;
+  }
+  if (ludicrousApp == APP_CLAUDE) claudeLudicrousPending = false;
+  else codexLudicrousPending = false;
+  if (displayMode == MODE_AUTO) currentApp = ludicrousApp;
+  ludicrousActive = true;
+  ludicrousStartMs = millis();
+  lastLudicrousFrameMs = 0;
+}
+
 // ---------- WiFi / bridge polling ----------
 
 WiFiManager wifiManager; // global: the config portal now runs non-blocking in loop()
 
+const uint16_t *setupChineseRows(uint32_t codepoint) {
+  for (size_t i = 0; i < SETUP_CHINESE_GLYPH_COUNT; ++i) {
+    if (SETUP_CHINESE_GLYPHS[i].codepoint == codepoint) return SETUP_CHINESE_GLYPHS[i].rows;
+  }
+  return nullptr;
+}
+
+uint32_t nextSetupCodepoint(const uint8_t *&cursor) {
+  const uint8_t first = *cursor++;
+  if (first < 0x80) return first;
+  if ((first & 0xE0) == 0xC0 && cursor[0] != 0) {
+    const uint32_t cp = ((uint32_t)(first & 0x1F) << 6) | (uint32_t)(cursor[0] & 0x3F);
+    cursor += 1;
+    return cp;
+  }
+  if ((first & 0xF0) == 0xE0 && cursor[0] != 0 && cursor[1] != 0) {
+    const uint32_t cp = ((uint32_t)(first & 0x0F) << 12) |
+                        ((uint32_t)(cursor[0] & 0x3F) << 6) | (uint32_t)(cursor[1] & 0x3F);
+    cursor += 2;
+    return cp;
+  }
+  if ((first & 0xF8) == 0xF0 && cursor[0] != 0 && cursor[1] != 0 && cursor[2] != 0) {
+    const uint32_t cp = ((uint32_t)(first & 0x07) << 18) |
+                        ((uint32_t)(cursor[0] & 0x3F) << 12) |
+                        ((uint32_t)(cursor[1] & 0x3F) << 6) | (uint32_t)(cursor[2] & 0x3F);
+    cursor += 3;
+    return cp;
+  }
+  return 0xFFFD;
+}
+
+// Draw the handful of Chinese labels used by the first-boot Wi-Fi screen.
+// Normal TFT_eSPI text remains the faster ASCII path everywhere else.
+void drawSetupText(const char *text, int x, int y, uint16_t color) {
+  tft.setTextColor(color, TFT_BLACK);
+  const uint8_t *cursor = reinterpret_cast<const uint8_t *>(text);
+  while (*cursor != 0) {
+    const uint32_t codepoint = nextSetupCodepoint(cursor);
+    if (codepoint < 0x80) {
+      tft.drawChar((uint16_t)codepoint, x, y, 2);
+      x += 12;
+      continue;
+    }
+
+    const uint16_t *rows = setupChineseRows(codepoint);
+    if (rows != nullptr) {
+      for (int row = 0; row < 16; ++row) {
+        uint16_t bits = rows[row];
+        for (int column = 0; column < 16; ++column) {
+          if (bits & (uint16_t)(1U << (15 - column))) tft.drawPixel(x + column, y + row, color);
+        }
+      }
+    }
+    x += 16;
+  }
+}
+
 void configModeCallback(WiFiManager *wm) {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("WiFi setup needed", 8, 32, 2);
-  tft.drawString("Connect phone to AP:", 8, 62, 2);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString(WIFI_PORTAL_AP_NAME, 8, 87, 2);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("then open 192.168.4.1", 8, 117, 2);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("Or: plug into the computer", 8, 155, 2);
-  tft.drawString("via USB - no WiFi needed", 8, 178, 2);
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawString("Firmware v" FW_VERSION, 8, 215, 2);
+  drawSetupText("正在连接 WiFi", 8, 32, TFT_WHITE);
+  drawSetupText("手机连热点:", 8, 62, TFT_WHITE);
+  drawSetupText("热点: ", 8, 87, TFT_YELLOW);
+  tft.drawString(WIFI_PORTAL_AP_NAME, 80, 87, 2);
+  drawSetupText("打开 192.168.4.1", 8, 117, TFT_WHITE);
+  drawSetupText("USB 连接电脑", 8, 155, TFT_CYAN);
+  drawSetupText("无需 WiFi", 8, 178, TFT_CYAN);
+  drawSetupText("固件: ", 8, 215, TFT_DARKGREY);
+  tft.drawString(FW_VERSION, 80, 215, 2);
+}
+
+void maintainWiFi() {
+  const wl_status_t status = WiFi.status();
+  if (status == WL_CONNECTED) {
+    if (!wifiWasConnected) {
+      wifiWasConnected = true;
+      Serial.printf("[wifi] reconnected ssid=%s ip=%s\n", WiFi.SSID().c_str(),
+                    WiFi.localIP().toString().c_str());
+      lastPollMs = 0;
+    }
+    return;
+  }
+
+  // Do not fight the first-time config portal when there are no saved
+  // credentials. Once STA has connected at least once (or credentials are
+  // present), explicitly ask the Arduino Wi-Fi stack to retry.
+  if (!wifiWasConnected && WiFi.SSID().length() == 0) return;
+  unsigned long now = millis();
+  if (now - lastWifiReconnectMs < WIFI_RECONNECT_INTERVAL_MS) return;
+  lastWifiReconnectMs = now;
+  Serial.printf("[wifi] disconnected status=%d, reconnecting...\n", (int)status);
+  WiFi.reconnect();
 }
 
 // Non-blocking: with saved credentials this still waits ~10s for the join,
@@ -1100,19 +1431,34 @@ void configModeCallback(WiFiManager *wm) {
 // keeps running from loop() while the USB serial link can take over the
 // screen (wired mode for APs with client isolation).
 void setupWiFi() {
+  WiFi.setAutoReconnect(true);
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setConfigPortalBlocking(false);
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Connecting WiFi...", 8, 100, 2);
+  drawSetupText("正在连接 WiFi", 8, 100, TFT_WHITE);
 
   Serial.println("[wifi] starting WiFiManager autoConnect (non-blocking portal)...");
   bool ok = wifiManager.autoConnect(WIFI_PORTAL_AP_NAME);
   Serial.printf("[wifi] autoConnect result=%d ssid=%s ip=%s\n", ok, WiFi.SSID().c_str(),
                 WiFi.localIP().toString().c_str());
   Serial.printf("[wifi] bridge host = '%s'\n", bridgeHost.c_str());
+}
+
+void observeFastTask(ActiveApp app, uint64_t seq) {
+  uint64_t &last = app == APP_CLAUDE ? lastClaudeFastTaskSeq : lastCodexFastTaskSeq;
+  bool &initialized = app == APP_CLAUDE ? claudeFastSeqInitialized : codexFastSeqInitialized;
+  if (!initialized) {
+    initialized = true;
+    last = seq;
+    return; // boot baseline: never replay an old task
+  }
+  if (seq > last) {
+    last = seq;
+    if (app == APP_CLAUDE) claudeLudicrousPending = true;
+    else codexLudicrousPending = true;
+  }
 }
 
 bool parseStatusJson(const String &payload) {
@@ -1131,18 +1477,28 @@ bool parseStatusJson(const String &payload) {
     claudeStatus.sevenDayPct = c["seven_day_pct"] | -1.0;
     claudeStatus.sevenDayResetMin = c["seven_day_reset_min"] | -1;
     claudeStatus.needsInput = c["needs_input"] | false;
+    claudeStatus.costToday = c["cost_today_usd"].is<float>() ? c["cost_today_usd"].as<float>() : -1;
+    claudeStatus.lastActivityAt = c["last_activity_at"] | (uint64_t)0;
+    claudeStatus.fastMode = c["fast_mode"] | false;
+    claudeStatus.fastTaskSeq = c["fast_task_seq"] | (uint64_t)0;
+    observeFastTask(APP_CLAUDE, claudeStatus.fastTaskSeq);
   }
 
   JsonObject x = doc["codex"];
   if (!x.isNull()) {
     codexStatus.status = x["status"] | "unknown";
     codexStatus.tokensToday = x["tokens_today"] | 0;
-    codexStatus.primaryPct = x["primary_pct"] | -1.0;
-    codexStatus.primaryResetMin = x["primary_reset_min"] | -1;
     codexStatus.weeklyPct = x["weekly_pct"] | -1.0;
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
     codexStatus.needsInput = x["needs_input"] | false;
+    codexStatus.costToday = x["cost_today_usd"].is<float>() ? x["cost_today_usd"].as<float>() : -1;
+    codexStatus.lastActivityAt = x["last_activity_at"] | (uint64_t)0;
+    codexStatus.fastMode = x["fast_mode"] | false;
+    codexStatus.fastTaskSeq = x["fast_task_seq"] | (uint64_t)0;
+    observeFastTask(APP_CODEX, codexStatus.fastTaskSeq);
   }
+  const char *preferred = doc["preferred_agent"] | "codex";
+  preferredApp = String(preferred) == "claude" ? APP_CLAUDE : APP_CODEX;
   statusMusicPlaying = doc["music_playing"] | false;
   return true;
 }
@@ -1182,9 +1538,9 @@ void pollBridge() {
     if (parseStatusJson(payload)) {
       lastSuccessMs = millis();
       everPolled = true;
-      Serial.printf("[bridge] claude=%s tok=%ld | codex=%s tok=%ld primary=%.0f%%\n",
+      Serial.printf("[bridge] claude=%s tok=%ld | codex=%s tok=%ld weekly=%.0f%%\n",
                     claudeStatus.status.c_str(), claudeStatus.tokensToday,
-                    codexStatus.status.c_str(), codexStatus.tokensToday, codexStatus.primaryPct);
+                    codexStatus.status.c_str(), codexStatus.tokensToday, codexStatus.weeklyPct);
     } else {
       Serial.println("[bridge] JSON parse failed");
     }
@@ -1194,11 +1550,15 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_MUSIC) {
+  if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_BTC) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
-    if (updateActiveApp()) drawActiveApp();
-    else refreshActiveApp();
+    bool switched = ludicrousActive ? false : updateActiveApp();
+    if (!ludicrousActive) {
+      if (switched) drawActiveApp();
+      else refreshActiveApp();
+    }
+    startPendingLudicrous();
   }
 }
 
@@ -1226,11 +1586,49 @@ void showMainUiIfNeeded() {
   drawActiveApp();
 }
 
+// The USB link used to acknowledge only with {name,fw}. That was enough to
+// feed the panel, but it left the Mac app's HTTP-only device controls looking
+// offline whenever Wi-Fi was unavailable. Return the same compact state as
+// /api/info so the app can use the USB path as a real control/status fallback.
+void sendSerialDeviceInfo() {
+  JsonDocument doc;
+  doc["name"] = "aiclock";
+  doc["fw"] = FW_VERSION;
+  doc["ip"] = WiFi.localIP().toString();
+  doc["ssid"] = WiFi.SSID();
+  doc["bridge"] = bridgeHost;
+  doc["mode"] = displayModeName(displayMode);
+  doc["effective"] = displayModeName(effectiveMode());
+  doc["showing"] = (currentApp == APP_CLAUDE) ? "claude" : "codex";
+  doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
+  doc["sprite_rev"] = spriteRev;
+  doc["brightness"] = brightness;
+  doc["wired"] = true;
+  JsonObject c = doc["claude"].to<JsonObject>();
+  c["status"] = claudeStatus.status;
+  c["custom_sprite"] = claudeCustom;
+  c["w"] = CLAUDE_SPRITE_W;
+  c["h"] = CLAUDE_SPRITE_H;
+  c["display_w"] = CLAUDE_DISPLAY_W;
+  c["display_h"] = CLAUDE_DISPLAY_H;
+  JsonObject x = doc["codex"].to<JsonObject>();
+  x["status"] = codexStatus.status;
+  x["custom_sprite"] = codexCustom;
+  x["w"] = CODEX_SPRITE_W;
+  x["h"] = CODEX_SPRITE_H;
+  x["display_w"] = CODEX_DISPLAY_W;
+  x["display_h"] = CODEX_DISPLAY_H;
+  String out;
+  serializeJson(doc, out);
+  Serial.print("#DEVICE ");
+  Serial.println(out);
+}
+
 void handleSerialFrame(char *line) {
   lastSerialFrameMs = millis();
   wiredEverLinked = true;
-  if (!strncmp(line, "#HELLO", 6)) {
-    Serial.printf("#DEVICE {\"name\":\"aiclock\",\"fw\":\"%s\"}\n", FW_VERSION);
+  if (!strncmp(line, "#HELLO", 6) || !strncmp(line, "#GETINFO", 8)) {
+    sendSerialDeviceInfo();
     return;
   }
   if (!strncmp(line, "#STATUS ", 8)) {
@@ -1239,9 +1637,13 @@ void handleSerialFrame(char *line) {
       everPolled = true;
       showMainUiIfNeeded();
       DisplayMode eff = effectiveMode();
-      if (eff != MODE_NET && eff != MODE_MUSIC) {
-        if (updateActiveApp()) drawActiveApp();
-        else refreshActiveApp();
+      if (eff != MODE_NET && eff != MODE_MUSIC && eff != MODE_BTC) {
+        bool switched = ludicrousActive ? false : updateActiveApp();
+        if (!ludicrousActive) {
+          if (switched) drawActiveApp();
+          else refreshActiveApp();
+        }
+        startPendingLudicrous();
       }
     }
     return;
@@ -1266,8 +1668,17 @@ void handleSerialFrame(char *line) {
       else if (m == "codex") displayMode = MODE_CODEX;
       else if (m == "net") displayMode = MODE_NET;
       else if (m == "music") displayMode = MODE_MUSIC;
+      else if (m == "btc") displayMode = MODE_BTC;
       // the effectiveMode transition handler in loop() repaints the chrome
     }
+    const char *newBridge = doc["bridge"] | (const char *)nullptr;
+    if (newBridge && strlen(newBridge) > 0) {
+      bridgeHost = newBridge;
+      bridgeHost.trim();
+      saveBridgeHost(bridgeHost);
+      lastPollMs = 0;
+    }
+    sendSerialDeviceInfo();
     return;
   }
 }
@@ -1356,8 +1767,8 @@ void handleRoot() {
   html += "<tr><td>Claude</td><td>" + htmlEscape(claudeStatus.status) + ", " +
           formatTokens(claudeStatus.tokensToday) + " tok</td></tr>";
   html += "<tr><td>Codex</td><td>" + htmlEscape(codexStatus.status) + ", " +
-          formatTokens(codexStatus.tokensToday) + " tok, 5h " +
-          (codexStatus.primaryPct >= 0 ? String(codexStatus.primaryPct, 0) + "%" : "?") + "</td></tr>";
+          formatTokens(codexStatus.tokensToday) + " tok, Weekly " +
+          (codexStatus.weeklyPct >= 0 ? String(codexStatus.weeklyPct, 0) + "%" : "?") + "</td></tr>";
   html += "</table>";
 
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "
@@ -1386,6 +1797,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_CODEX) return "codex";
   if (m == MODE_NET) return "net";
   if (m == MODE_MUSIC) return "music";
+  if (m == MODE_BTC) return "btc";
   return "auto";
 }
 
@@ -1408,11 +1820,15 @@ void handleApiInfo() {
   c["custom_sprite"] = claudeCustom;
   c["w"] = CLAUDE_SPRITE_W;
   c["h"] = CLAUDE_SPRITE_H;
+  c["display_w"] = CLAUDE_DISPLAY_W;
+  c["display_h"] = CLAUDE_DISPLAY_H;
   JsonObject x = doc["codex"].to<JsonObject>();
   x["status"] = codexStatus.status;
   x["custom_sprite"] = codexCustom;
   x["w"] = CODEX_SPRITE_W;
   x["h"] = CODEX_SPRITE_H;
+  x["display_w"] = CODEX_DISPLAY_W;
+  x["display_h"] = CODEX_DISPLAY_H;
   String out;
   serializeJson(doc, out);
   webServer.send(200, "application/json", out);
@@ -1425,8 +1841,9 @@ void handleApiDisplay() {
   else if (mode == "codex") displayMode = MODE_CODEX;
   else if (mode == "net") displayMode = MODE_NET;
   else if (mode == "music") displayMode = MODE_MUSIC;
+  else if (mode == "btc") displayMode = MODE_BTC;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music|btc");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
@@ -1436,6 +1853,8 @@ void handleApiDisplay() {
   } else if (displayMode == MODE_MUSIC) {
     musicChromeDrawn = false;
     lastMusicPollMs = 0; // poll + draw on the next loop tick
+  } else if (displayMode == MODE_BTC) {
+    lastBtcPollMs = 0;
   } else {
     updateActiveApp();
     drawActiveApp(); // unconditional: also repaints over a previous net chart
@@ -1828,6 +2247,7 @@ void setup() {
 
 void loop() {
   wifiManager.process(); // keeps the config portal alive until WiFi is set up
+  maintainWiFi();        // recover a dropped STA link without losing USB mode
   pumpSerial();          // wired (USB) bridge frames
 
   if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
@@ -1855,13 +2275,29 @@ void loop() {
     } else if (eff == MODE_MUSIC) {
       musicChromeDrawn = false;
       lastMusicPollMs = 0;
+    } else if (eff == MODE_BTC) {
+      lastBtcPollMs = 0;
     } else {
       updateActiveApp();
       drawActiveApp();
     }
   }
 
-  if (eff == MODE_NET) {
+  if (ludicrousActive) {
+    if (eff == MODE_NET || eff == MODE_MUSIC || eff == MODE_BTC || bridgeStale()
+        || claudeStatus.needsInput || codexStatus.needsInput) {
+      ludicrousActive = false;
+      claudeLudicrousPending = codexLudicrousPending = false;
+      if (eff == MODE_AUTO || eff == MODE_CLAUDE || eff == MODE_CODEX) drawActiveApp();
+    } else if (nowMs - ludicrousStartMs >= 2400) {
+      ludicrousActive = false;
+      drawActiveApp();
+      startPendingLudicrous();
+    } else if (nowMs - lastLudicrousFrameMs >= 80) {
+      lastLudicrousFrameMs = nowMs;
+      drawLudicrousFrame((nowMs - ludicrousStartMs) / 2400.0f);
+    }
+  } else if (eff == MODE_NET) {
     // net-speed mode: rendering (constant-rate sweep) is independent of the
     // bridge polls that refill its sample queue
     if (nowMs - lastNetDrawMs >= NET_DRAW_INTERVAL_MS) {
@@ -1877,6 +2313,11 @@ void loop() {
     if (nowMs - lastMusicPollMs >= MUSIC_POLL_INTERVAL_MS) {
       lastMusicPollMs = nowMs;
       pollMusic();
+    }
+  } else if (eff == MODE_BTC) {
+    if (nowMs - lastBtcPollMs >= BTC_POLL_INTERVAL_MS || lastBtcPollMs == 0) {
+      lastBtcPollMs = nowMs;
+      pollBtc();
     }
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)

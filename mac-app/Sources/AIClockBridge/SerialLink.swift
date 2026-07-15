@@ -13,6 +13,8 @@ import IOKit.serial
 // NOTE: the port is opened non-exclusively so esptool/pio can still flash,
 // but quit the app before flashing to avoid the two readers fighting.
 final class SerialLink {
+    static weak var shared: SerialLink?
+
     private let service: StatusService
     private let netMonitor: NetSpeedMonitor
 
@@ -30,6 +32,7 @@ final class SerialLink {
     init(service: StatusService, netMonitor: NetSpeedMonitor) {
         self.service = service
         self.netMonitor = netMonitor
+        Self.shared = self
     }
 
     func start() {
@@ -40,6 +43,18 @@ final class SerialLink {
     }
 
     var isLinked: Bool { linked }
+
+    /// Sends a small control frame to the firmware. The current C3 firmware
+    /// accepts display, brightness and bridge fields; older firmware simply
+    /// ignores fields it does not know, so this remains backwards-compatible.
+    @discardableResult
+    func sendCommand(_ fields: [String: String]) -> Bool {
+        guard linked,
+              let data = try? JSONSerialization.data(withJSONObject: fields,
+                                                     options: [.sortedKeys]) else { return false }
+        send(frame("#CMD ", data))
+        return true
+    }
 
     private func tick() {
         if fd < 0 {
@@ -60,7 +75,13 @@ final class SerialLink {
             }
             return
         }
-        if now.timeIntervalSince(lastStatusAt) > 5 {
+        // Refresh the full device snapshot (including a DHCP-changed IP) over
+        // USB without interrupting the normal status/net cadence.
+        if now.timeIntervalSince(lastHelloAt) > 10 {
+            lastHelloAt = now
+            send("#GETINFO\n".data(using: .utf8)!)
+        }
+        if now.timeIntervalSince(lastStatusAt) > 2 {
             lastStatusAt = now
             send(frame("#STATUS ", service.snapshot().jsonData()))
         }
@@ -199,6 +220,10 @@ final class SerialLink {
             guard let line = String(data: lineData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) else { continue }
             if line.hasPrefix("#DEVICE") {
+                if let space = line.firstIndex(of: " ") {
+                    let json = String(line[line.index(after: space)...])
+                    DeviceClient.acceptWiredInfo(Data(json.utf8))
+                }
                 if !linked {
                     linked = true
                     lastStatusAt = .distantPast // push a status immediately

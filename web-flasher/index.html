@@ -24,9 +24,9 @@
   <main>
     <div class="card">
       <h1>AI Clock · ESP32-C3</h1>
-      <p>仅适用于 4MB Flash 的 ESP32-C3。连接设备后，浏览器会先校验芯片家族，再写入合并固件。</p>
+      <p>仅适用于 4MB Flash 的 ESP32-C3。连接设备后，浏览器会先校验芯片家族，再分别写入启动、分区表和应用段。</p>
       <div class="notice">
-        第一次安装建议勾选擦除，但请先备份原固件。烧录期间不要拔线。烧录成功不代表屏幕引脚自动匹配；参考接线见项目文档。
+        日常升级请不要勾选“抹除”，这样会保留 Wi-Fi 和 LittleFS；只有首次安装或需要清空配置时才勾选。请先备份原固件，烧录期间不要拔线。烧录成功不代表屏幕引脚自动匹配；参考接线见项目文档。
       </div>
       <esp-web-install-button manifest="manifest.json">
         <button slot="activate">连接设备并烧录</button>

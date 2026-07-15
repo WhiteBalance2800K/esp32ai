@@ -1,28 +1,32 @@
 import Foundation
 
-// Talks to the ESP8266 clock's own HTTP API, so everything the device's web
-// page can do (switch display, set bridge host, upload/reset pet GIFs) is
-// available straight from the menu bar. Device address persists in defaults.
+// Talks to the clock's HTTP API when LAN is available, with a USB serial
+// fallback for status and the small control commands (display/brightness/
+// bridge). Device address persists in defaults; USB status is kept in memory.
 
 struct DeviceInfo {
     var ip = ""
     var ssid = ""
     var bridge = ""
-    var mode = "auto"       // configured: auto | claude | codex | net | music
+    var mode = "auto"       // configured: auto | claude | codex | net | music | btc (行情兼容名)
     var effective = "auto"  // what's actually on screen (AUTO may promote to music)
     var showing = ""
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
     var brightness = 100    // backlight 0-100 (0 = off)
+    var wired = false       // current response came over the USB serial link
     var claudeCustomSprite = false
     var codexCustomSprite = false
     var claudeW = 111, claudeH = 120
     var codexW = 120, codexH = 120
+    var claudeDisplayW = 94, claudeDisplayH = 102
+    var codexDisplayW = 102, codexDisplayH = 102
 }
 
 final class DeviceClient {
     private static let hostKey = "device_host"
     private static let lastSeenKey = "device_last_seen"
+    private static var wiredInfo: DeviceInfo?
 
     static var host: String {
         get { UserDefaults.standard.string(forKey: hostKey) ?? "" }
@@ -41,58 +45,81 @@ final class DeviceClient {
         return URL(string: h.hasPrefix("http") ? h : "http://\(h)")
     }
 
+    static var wiredAvailable: Bool {
+        SerialLink.shared?.isLinked == true && wiredInfo != nil
+    }
+
+    /// Called by SerialLink when the firmware answers #HELLO/#GETINFO. This
+    /// cache is deliberately kept separate from the persisted LAN address:
+    /// USB remains usable while the device is roaming, disconnected from Wi-Fi
+    /// or behind an AP's client-isolation policy.
+    static func acceptWiredInfo(_ data: Data) {
+        guard var info = decodeInfo(data) else { return }
+        info.wired = true
+        wiredInfo = info
+        if !info.ip.isEmpty, info.ip != "0.0.0.0" {
+            lastSeenIP = info.ip
+        }
+    }
+
+    private static func currentWiredInfo() -> DeviceInfo? {
+        guard SerialLink.shared?.isLinked == true, var info = wiredInfo else { return nil }
+        info.wired = true
+        return info
+    }
+
     /// GET /api/info
     static func fetchInfo(completion: @escaping (Result<DeviceInfo, Error>) -> Void) {
         guard let base = baseURL else {
-            completion(.failure(Self.noHostError))
+            DispatchQueue.main.async {
+                if let info = Self.currentWiredInfo() { completion(.success(info)) }
+                else { completion(.failure(Self.noHostError)) }
+            }
             return
         }
         var req = URLRequest(url: base.appendingPathComponent("api/info"))
         req.timeoutInterval = 5
         URLSession.shared.dataTask(with: req) { data, _, error in
-            var result: Result<DeviceInfo, Error>
-            if let error = error {
-                result = .failure(error)
-            } else if let data = data,
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                var info = DeviceInfo()
-                info.ip = obj["ip"] as? String ?? ""
-                info.ssid = obj["ssid"] as? String ?? ""
-                info.bridge = obj["bridge"] as? String ?? ""
-                info.mode = obj["mode"] as? String ?? "auto"
-                info.effective = obj["effective"] as? String ?? info.mode
-                info.showing = obj["showing"] as? String ?? ""
-                info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
-                info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
-                info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
-                let claude = obj["claude"] as? [String: Any]
-                let codex = obj["codex"] as? [String: Any]
-                info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
-                info.codexCustomSprite = codex?["custom_sprite"] as? Bool ?? false
-                info.claudeW = (claude?["w"] as? NSNumber)?.intValue ?? 111
-                info.claudeH = (claude?["h"] as? NSNumber)?.intValue ?? 120
-                info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
-                info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
-                result = .success(info)
-            } else {
-                result = .failure(Self.badResponseError)
+            let parsed = data.flatMap { Self.decodeInfo($0) }
+            DispatchQueue.main.async {
+                if var info = parsed {
+                    info.wired = false
+                    completion(.success(info))
+                } else if let info = Self.currentWiredInfo() {
+                    completion(.success(info))
+                } else if let error {
+                    completion(.failure(error))
+                } else {
+                    completion(.failure(Self.badResponseError))
+                }
             }
-            DispatchQueue.main.async { completion(result) }
         }.resume()
     }
 
-    /// POST /api/display  mode=auto|claude|codex|net|music
+    /// POST /api/display  mode=auto|claude|codex|net|music|btc
     static func setDisplayMode(_ mode: String, completion: @escaping (Error?) -> Void) {
+        if SerialLink.shared?.sendCommand(["display": mode]) == true {
+            DispatchQueue.main.async { completion(nil) }
+            return
+        }
         postForm(path: "api/display", fields: ["mode": mode], completion: completion)
     }
 
     /// POST /api/bridge  host=ip:port
     static func setBridgeHost(_ bridgeHost: String, completion: @escaping (Error?) -> Void) {
+        if SerialLink.shared?.sendCommand(["bridge": bridgeHost]) == true {
+            DispatchQueue.main.async { completion(nil) }
+            return
+        }
         postForm(path: "api/bridge", fields: ["host": bridgeHost], completion: completion)
     }
 
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     static func setBrightness(_ level: Int, completion: @escaping (Error?) -> Void) {
+        if SerialLink.shared?.sendCommand(["brightness": String(level)]) == true {
+            DispatchQueue.main.async { completion(nil) }
+            return
+        }
         postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
     }
 
@@ -146,6 +173,40 @@ final class DeviceClient {
     }
 
     // MARK: - internals
+
+    private static func decodeInfo(_ data: Data) -> DeviceInfo? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        var info = DeviceInfo()
+        info.ip = obj["ip"] as? String ?? ""
+        info.ssid = obj["ssid"] as? String ?? ""
+        info.bridge = obj["bridge"] as? String ?? ""
+        info.mode = obj["mode"] as? String ?? "auto"
+        info.effective = obj["effective"] as? String ?? info.mode
+        info.showing = obj["showing"] as? String ?? ""
+        info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
+        info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
+        info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
+        info.wired = obj["wired"] as? Bool ?? false
+        let claude = obj["claude"] as? [String: Any]
+        let codex = obj["codex"] as? [String: Any]
+        info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
+        info.codexCustomSprite = codex?["custom_sprite"] as? Bool ?? false
+        info.claudeW = (claude?["w"] as? NSNumber)?.intValue ?? 111
+        info.claudeH = (claude?["h"] as? NSNumber)?.intValue ?? 120
+        info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
+        info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
+        info.claudeDisplayW = (claude?["display_w"] as? NSNumber)?.intValue
+            ?? Int((Double(info.claudeW) * 0.85).rounded())
+        info.claudeDisplayH = (claude?["display_h"] as? NSNumber)?.intValue
+            ?? Int((Double(info.claudeH) * 0.85).rounded())
+        info.codexDisplayW = (codex?["display_w"] as? NSNumber)?.intValue
+            ?? Int((Double(info.codexW) * 0.85).rounded())
+        info.codexDisplayH = (codex?["display_h"] as? NSNumber)?.intValue
+            ?? Int((Double(info.codexH) * 0.85).rounded())
+        return info
+    }
 
     private static func postForm(path: String, fields: [String: String],
                                  completion: @escaping (Error?) -> Void) {
@@ -212,6 +273,12 @@ final class DeviceClient {
     ///     device that has WiFi but no bridge configured yet).
     static func autoPair(progress: @escaping (String) -> Void,
                          completion: @escaping (String?) -> Void) {
+        if wiredAvailable {
+            progress("USB 串口已连接")
+            let ip = currentWiredInfo()?.ip
+            completion((ip?.isEmpty == false && ip != "0.0.0.0") ? ip : "USB")
+            return
+        }
         var candidates: [String] = []
         if !lastSeenIP.isEmpty { candidates.append(lastSeenIP) }
         let configured = host.split(separator: ":").first.map(String.init) ?? host

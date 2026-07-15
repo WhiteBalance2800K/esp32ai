@@ -6,11 +6,11 @@ import Foundation
 //           ~/.claude/.credentials.json), then GET
 //           https://api.anthropic.com/api/oauth/usage  (5h + 7d windows)
 //   Codex:  token from ~/.codex/auth.json, then GET
-//           https://chatgpt.com/backend-api/wham/usage (5h + weekly windows)
+//           https://chatgpt.com/backend-api/wham/usage (weekly window only)
 // Tokens never leave this machine except toward their own vendor's API.
 
 struct ProviderUsage {
-    var primaryPct: Double?     // 5h window used %
+    var primaryPct: Double?     // Claude 5h window used %
     var primaryResetMin: Int?   // minutes until it resets
     var weeklyPct: Double?      // 7d / weekly window used %
     var weeklyResetMin: Int?
@@ -70,7 +70,7 @@ final class UsageFetcher {
     }
 
     private static func merge(old: ProviderUsage, new: ProviderUsage) -> ProviderUsage {
-        if new.primaryPct == nil && new.weeklyPct == nil && old.primaryPct != nil {
+        if new.primaryPct == nil && new.weeklyPct == nil && (old.primaryPct != nil || old.weeklyPct != nil) {
             var kept = old
             kept.error = new.error
             return kept
@@ -180,15 +180,9 @@ final class UsageFetcher {
             return usage
         }
         let now = Date().timeIntervalSince1970
-        if let w = rateLimit["primary_window"] as? [String: Any] {
-            usage.primaryPct = (w["used_percent"] as? NSNumber)?.doubleValue
-            if let reset = (w["reset_at"] as? NSNumber)?.doubleValue {
-                usage.primaryResetMin = max(0, Int((reset - now) / 60))
-            }
-        }
-        if let w = rateLimit["secondary_window"] as? [String: Any] {
-            usage.weeklyPct = (w["used_percent"] as? NSNumber)?.doubleValue
-            if let reset = (w["reset_at"] as? NSNumber)?.doubleValue {
+        if let weekly = codexWeeklyWindow(from: rateLimit) {
+            usage.weeklyPct = weekly.usedPercent
+            if let reset = weekly.resetsAt {
                 usage.weeklyResetMin = max(0, Int((reset - now) / 60))
             }
         }

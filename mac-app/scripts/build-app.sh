@@ -9,9 +9,11 @@ swift build -c release
 BIN_DIR="$(swift build -c release --show-bin-path)"
 EXECUTABLE="$BIN_DIR/AIClockBridge"
 RESOURCE_BUNDLE="$BIN_DIR/AIClockBridge_AIClockBridge.bundle"
+APP_ICON="$ROOT/Assets/AppIcon.icns"
 
 [[ -x "$EXECUTABLE" ]] || { print -u2 "missing executable: $EXECUTABLE"; exit 1; }
 [[ -d "$RESOURCE_BUNDLE" ]] || { print -u2 "missing resources: $RESOURCE_BUNDLE"; exit 1; }
+[[ -f "$APP_ICON" ]] || { print -u2 "missing app icon: $APP_ICON"; exit 1; }
 command -v trash >/dev/null || { print -u2 "the macOS trash command is required"; exit 1; }
 
 TEMP_ROOT="$(mktemp -d "$ROOT/.build/.package-app.XXXXXX")"
@@ -29,6 +31,7 @@ trap cleanup EXIT
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 install -m 755 "$EXECUTABLE" "$STAGED_APP/Contents/MacOS/AIClockBridge"
 install -m 644 "$ROOT/Info.plist" "$STAGED_APP/Contents/Info.plist"
+install -m 644 "$APP_ICON" "$STAGED_APP/Contents/Resources/AppIcon.icns"
 
 ditto "$RESOURCE_BUNDLE" "$STAGED_APP/Contents/Resources/AIClockBridge_AIClockBridge.bundle"
 

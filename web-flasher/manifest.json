@@ -1,6 +1,6 @@
 {
   "name": "AI Clock ESP32-C3",
-  "version": "0.4.6-c3.5",
+  "version": "0.4.6-c3.10",
   "new_install_prompt_erase": true,
   "new_install_improv_wait_time": 0,
   "builds": [
@@ -8,8 +8,20 @@
       "chipFamily": "ESP32-C3",
       "parts": [
         {
-          "path": "firmware/esp32c3-ai-clock-0.4.6-c3.5-fb5ae7e3a0f9.bin",
+          "path": "firmware/esp32c3-ai-clock-0.4.6-c3.10-bootloader-733ff20351ab.bin",
           "offset": 0
+        },
+        {
+          "path": "firmware/esp32c3-ai-clock-0.4.6-c3.10-partitions-6a88d59601a8.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/esp32c3-ai-clock-0.4.6-c3.10-boot_app0-f94c5d786a7a.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/esp32c3-ai-clock-0.4.6-c3.10-application-d311c9787051.bin",
+          "offset": 65536
         }
       ]
     }
