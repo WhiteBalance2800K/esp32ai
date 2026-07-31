@@ -11,8 +11,14 @@ def to_rgb565(r, g, b):
 
 
 def load_gif_frames(gif_path):
-    im = Image.open(gif_path)
-    return [frame.convert("RGBA") for frame in ImageSequence.Iterator(im)]
+    with Image.open(gif_path) as im:
+        return [frame.convert("RGBA").copy() for frame in ImageSequence.Iterator(im)]
+
+
+def rgb_pixels(frame):
+    """Iterate RGB pixels without Pillow's deprecated getdata() API."""
+    data = frame.tobytes()
+    return zip(data[0::3], data[1::3], data[2::3])
 
 
 def slice_spritesheet_row(sheet_img, cell_w, cell_h, row=0, max_cols=None):
@@ -50,7 +56,7 @@ def frame_to_raw_bytes(frame):
     """Raw RGB565 bytes for one frame, in the exact byte order the firmware's
     pushImage() expects (see to_rgb565's note on the swap)."""
     out = bytearray()
-    for (r, g, b) in frame.getdata():
+    for r, g, b in rgb_pixels(frame):
         val = to_rgb565(r, g, b)
         out.append(val & 0xFF)
         out.append(val >> 8)
@@ -78,7 +84,7 @@ def frames_to_header(frames, out_w, out_h, var_name, header_path, max_frames=Non
         f.write(f"#define {var_name.upper()}_FRAMES {len(processed)}\n\n")
         for i, fr in enumerate(processed):
             f.write(f"const uint16_t {var_name}_{i}[{out_w * out_h}] PROGMEM = {{\n")
-            vals = [str(to_rgb565(r, g, b)) for (r, g, b) in fr.getdata()]
+            vals = [str(to_rgb565(r, g, b)) for r, g, b in rgb_pixels(fr)]
             for row_start in range(0, len(vals), 16):
                 f.write(",".join(vals[row_start:row_start + 16]) + ",\n")
             f.write("};\n\n")

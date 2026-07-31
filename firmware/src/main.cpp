@@ -299,12 +299,14 @@ void saveBrightness() {
 
 // ---------- persisted pet appearance ----------
 
-enum PetPreset { PET_CLASSIC, PET_BORDER_COLLIE };
+enum PetPreset { PET_CLASSIC, PET_BORDER_COLLIE, PET_CUSTOM };
 PetPreset petPreset = PET_CLASSIC;
 int petScale = PET_SCALE_DEFAULT; // 60-100%; custom GIFs use the same size
 
 const char *petPresetName() {
-  return petPreset == PET_BORDER_COLLIE ? "border-collie" : "classic";
+  if (petPreset == PET_BORDER_COLLIE) return "border-collie";
+  if (petPreset == PET_CUSTOM) return "custom";
+  return "classic";
 }
 
 int scaledPetSize(int source) {
@@ -319,7 +321,9 @@ void loadPetAppearance() {
   int scale = f.readStringUntil('\n').toInt();
   f.close();
   preset.trim();
-  petPreset = preset == "border-collie" ? PET_BORDER_COLLIE : PET_CLASSIC;
+  if (preset == "border-collie") petPreset = PET_BORDER_COLLIE;
+  else if (preset == "custom") petPreset = PET_CUSTOM;
+  else petPreset = PET_CLASSIC;
   if (scale >= 60 && scale <= 100) petScale = scale;
 }
 
@@ -383,14 +387,18 @@ void loadCustomSpriteState() {
 
   Serial.printf("[sprite] claude custom=%d frames=%d | codex custom=%d frames=%d\n", claudeCustom,
                 claudeCustomFrames, codexCustom, codexCustomFrames);
+  if (petPreset == PET_CUSTOM && !claudeCustom && !codexCustom) {
+    petPreset = PET_CLASSIC;
+    savePetAppearance();
+  }
 }
 
 int claudeFrameCount() {
-  if (claudeCustom) return claudeCustomFrames;
+  if (petPreset == PET_CUSTOM && claudeCustom) return claudeCustomFrames;
   return petPreset == PET_BORDER_COLLIE ? BORDER_COLLIE_SPRITE_FRAMES : CLAUDE_SPRITE_FRAMES;
 }
 int codexFrameCount() {
-  if (codexCustom) return codexCustomFrames;
+  if (petPreset == PET_CUSTOM && codexCustom) return codexCustomFrames;
   return petPreset == PET_BORDER_COLLIE ? BORDER_COLLIE_SPRITE_FRAMES : CODEX_SPRITE_FRAMES;
 }
 
@@ -551,7 +559,8 @@ void drawSquareRing(float pct, uint16_t color) {
 }
 
 bool appUsesCustom(ActiveApp app) {
-  return (app == APP_CLAUDE && claudeCustom) || (app == APP_CODEX && codexCustom);
+  return petPreset == PET_CUSTOM &&
+         ((app == APP_CLAUDE && claudeCustom) || (app == APP_CODEX && codexCustom));
 }
 
 bool appUsesCollie(ActiveApp app) {
@@ -2047,7 +2056,10 @@ void handleSerialFrame(char *line) {
     }
     const char *preset = doc["pet_preset"] | (const char *)nullptr;
     if (preset) {
-      petPreset = String(preset) == "border-collie" ? PET_BORDER_COLLIE : PET_CLASSIC;
+      String p(preset);
+      if (p == "border-collie") petPreset = PET_BORDER_COLLIE;
+      else if (p == "custom" && (claudeCustom || codexCustom)) petPreset = PET_CUSTOM;
+      else petPreset = PET_CLASSIC;
     }
     if (doc["pet_scale"].is<int>()) {
       petScale = constrain(doc["pet_scale"].as<int>(), 60, 100);
@@ -2135,12 +2147,15 @@ void handleRoot() {
           "%</span>（0 = 熄屏，设置立即生效并记住）</div>";
 
   html += "<h2 style='font-size:16px;margin-top:28px'>桌宠外观</h2>";
-  html += "<label>内置宠物</label><select id='petPreset' onchange='savePet()'>"
+  html += "<label>宠物样式</label><select id='petPreset' onchange='savePet()'>"
           "<option value='classic'";
   if (petPreset == PET_CLASSIC) html += " selected";
   html += ">经典宠物</option><option value='border-collie'";
   if (petPreset == PET_BORDER_COLLIE) html += " selected";
-  html += ">咖色边牧</option></select>";
+  html += ">咖色边牧</option><option value='custom'";
+  if (petPreset == PET_CUSTOM) html += " selected";
+  if (!claudeCustom && !codexCustom) html += " disabled";
+  html += ">自定义</option></select>";
   html += "<label>宠物大小</label><input type='range' min='60' max='100' step='5' value='" +
           String(petScale) + "' id='petScale' "
           "oninput=\"document.getElementById('petsv').textContent=this.value+'%'\" "
@@ -2151,8 +2166,8 @@ void handleRoot() {
           "'application/x-www-form-urlencoded'},body:'preset='+document.getElementById('petPreset').value+"
           "'&scale='+document.getElementById('petScale').value})}</script>";
 
-  // On-device GIF upload: replaces a character's animation without reflashing.
-  html += "<h2 style='font-size:16px;margin-top:28px'>桌宠动画（上传 GIF）</h2>";
+  // On-device GIF upload is the custom option of the same pet appearance section.
+  html += "<h3 style='font-size:15px;margin-top:22px'>自定义（上传 GIF）</h3>";
   html += "<p style='font-size:13px;color:#555'>上传一个 .gif，设备会在板上解码并缩放到对应角色的尺寸，"
           "立刻替换动画，无需重新编译或烧录。GIF 太大可能因内存不足解码失败，换小一点的即可。</p>";
   html += "<form id='gifForm' method='POST' enctype='multipart/form-data' onsubmit='return setGifAction()'>";
@@ -2307,8 +2322,9 @@ void handleApiPet() {
   if (preset.length() > 0) {
     if (preset == "classic") petPreset = PET_CLASSIC;
     else if (preset == "border-collie") petPreset = PET_BORDER_COLLIE;
+    else if (preset == "custom" && (claudeCustom || codexCustom)) petPreset = PET_CUSTOM;
     else {
-      webServer.send(400, "text/plain", "preset must be classic|border-collie");
+      webServer.send(400, "text/plain", "preset must be classic|border-collie|custom (custom requires an upload)");
       return;
     }
   }
@@ -2598,6 +2614,10 @@ void handleSpriteUploadDone(ActiveApp slot) {
 
   spriteRev++;
   loadCustomSpriteState();
+  if (ok) {
+    petPreset = PET_CUSTOM;
+    savePetAppearance();
+  }
   if (slot == APP_CLAUDE) claudeFrame = 0;
   else codexFrame = 0;
   if (currentApp == slot) drawActiveApp();

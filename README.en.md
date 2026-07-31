@@ -42,7 +42,7 @@ at compile time and again when generating the Web image. See the
 
 To use the bundled flasher locally, run `python3 -m http.server 8000` from the repository root and
 open `http://localhost:8000/web-flasher/` in desktop Chrome or Edge. The verified build is
-`0.4.6-c3.13`.
+`0.4.6-c3.14`.
 
 > This port is based on [pengchujin/esp8266-ai](https://github.com/pengchujin/esp8266-ai).
 > ESP32-C3 is now the default target; the original `nodemcuv2` ESP8266 target remains available.
@@ -101,7 +101,7 @@ Daily use is all on the tray icon: **left-click** opens a live mirror of the dev
 
 - **Screen border flashing red**: the device can't reach the bridge — make sure the app is running and on the same WiFi.
 - **Quota shows `-` forever**: no Claude Code / Codex CLI login on this machine, so the bridge has no credentials to read.
-- **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
+- **Want a different pet**: right-click the tray icon → "Pet appearance" → "Custom…", pick one and upload.
 
 ## Development
 

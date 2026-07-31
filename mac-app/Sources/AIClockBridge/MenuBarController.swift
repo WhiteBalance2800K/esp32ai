@@ -114,8 +114,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         quotaMenu.addItem(makeItem("清除 Kimi Code API Key", #selector(clearKimiAPIKey)))
         let quotaItem = NSMenuItem(title: "AI 额度设置", action: nil, keyEquivalent: "")
         quotaItem.submenu = quotaMenu
-        menu.addItem(quotaItem)
-        menu.addItem(.separator())
 
         deviceInfoItem.isEnabled = false
         menu.addItem(deviceInfoItem)
@@ -140,6 +138,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             }
             displayMenu.addItem(item)
         }
+        displayMenu.addItem(.separator())
+        displayMenu.addItem(quotaItem)
         let displayItem = NSMenuItem(title: "屏幕显示", action: nil, keyEquivalent: "")
         displayItem.submenu = displayMenu
         menu.addItem(displayItem)
@@ -177,8 +177,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(makeItem("搜索/添加行情…", #selector(searchMarket)))
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
-        menu.addItem(makeItem("更换桌宠动画…（petdex）", #selector(openPetPicker)))
-
         let petMenu = NSMenu()
         for (title, preset) in [("经典宠物", "classic"), ("咖色边牧", "border-collie")] {
             let item = NSMenuItem(title: title, action: #selector(setPetPreset(_:)), keyEquivalent: "")
@@ -187,6 +185,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             petPresetItems[preset] = item
             petMenu.addItem(item)
         }
+        let customItem = makeItem("自定义…", #selector(openPetPicker))
+        petPresetItems["custom"] = customItem
+        petMenu.addItem(customItem)
         petMenu.addItem(.separator())
         for (title, scale) in [("小号 70%", 70), ("标准 85%", 85), ("大号 100%", 100)] {
             let item = NSMenuItem(title: title, action: #selector(setPetScale(_:)), keyEquivalent: "")

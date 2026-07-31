@@ -131,9 +131,6 @@ sealed class TrayAppContext : ApplicationContext
         quotaMenu.DropDownItems.Add(new ToolStripSeparator());
         quotaMenu.DropDownItems.Add(MakeItem("设置 Kimi Code API Key…", (_, _) => SetKimiApiKey()));
         quotaMenu.DropDownItems.Add(MakeItem("清除 Kimi Code API Key", (_, _) => ClearKimiApiKey()));
-        _menu.Items.Add(quotaMenu);
-        _menu.Items.Add(new ToolStripSeparator());
-
         _menu.Items.Add(_deviceInfoItem);
         _menu.Items.Add(MakeItem("自动查找并配对设备", async (_, _) => await AutoPairAction()));
         _menu.Items.Add(MakeItem("设置设备地址…", (_, _) => SetDeviceAddress()));
@@ -156,6 +153,8 @@ sealed class TrayAppContext : ApplicationContext
             _modeItems[mode] = item;
             displayMenu.DropDownItems.Add(item);
         }
+        displayMenu.DropDownItems.Add(new ToolStripSeparator());
+        displayMenu.DropDownItems.Add(quotaMenu);
         _menu.Items.Add(displayMenu);
 
         var intervalMenu = new ToolStripMenuItem("行情 K线周期");
@@ -184,8 +183,6 @@ sealed class TrayAppContext : ApplicationContext
         _menu.Items.Add(MakeItem("搜索/添加行情…", (_, _) => SearchMarket()));
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
-        _menu.Items.Add(MakeItem("更换桌宠动画…（petdex）", (_, _) => OpenPetPicker()));
-
         var petMenu = new ToolStripMenuItem("桌宠外观");
         foreach (var (title, preset) in new[]
         {
@@ -197,6 +194,9 @@ sealed class TrayAppContext : ApplicationContext
             _petPresetItems[preset] = item;
             petMenu.DropDownItems.Add(item);
         }
+        var customItem = MakeItem("自定义…", (_, _) => OpenPetPicker());
+        _petPresetItems["custom"] = customItem;
+        petMenu.DropDownItems.Add(customItem);
         petMenu.DropDownItems.Add(new ToolStripSeparator());
         foreach (var (title, scale) in new[]
         {
