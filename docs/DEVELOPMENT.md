@@ -13,6 +13,10 @@
   [CodexBar](https://github.com/steipete/CodexBar) 相同，token 只发给各自官方 API）：
   - Claude：Keychain 里的 `Claude Code-credentials` → `api.anthropic.com/api/oauth/usage`
   - Codex：`~/.codex/auth.json` → `chatgpt.com/backend-api/wham/usage`
+  - Grok Build：优先 `~/.grok/auth.json`，回退 `~/.pi/agent/auth.json` 的 `xai`
+    登录 → `cli-chat-proxy.grok.com/v1/billing?format=credits`
+  - Kimi Code：优先有效的 `~/.kimi-code/credentials/kimi-code.json`，回退系统安全存储
+    中的 API Key → `api.kimi.com/coding/v1/usages`
 
 架构：`mac-app/` 是一个 **Swift 原生菜单栏 app**（Windows 用户用 `windows-app/`，
 功能一致的 C# 托盘移植版），读日志、开一个本地 HTTP 服务；
@@ -49,19 +53,22 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   `GET /sprite/<app>/raw` 拉取（设备正在用什么就播什么，自定义/内置都一样），
   working 时同步播放走路循环，随设备 2s/6s 切换同步换角色；底部附
   自动/Claude/Codex 快速切换。
-- **右键点击** → 控制菜单：Claude 5h/周、Codex Weekly 用量与重置倒计时 + 设备遥控：
+- **右键点击** → 控制菜单：Claude 5h/周、Codex Weekly、Grok Build Weekly、
+  Kimi Code 5h/周用量与重置倒计时 + 设备遥控：
 
 - **自动查找并配对设备**：一般不用手动——设备本来就在轮询本机的 `/status`，
   bridge 记下来访 IP 即完成发现（零扫描）；地址为空时自动配对，设备 DHCP 换了 IP
   也会自愈。菜单项走完整流程：最近来访 IP → 已配置地址复验 → 子网 /24 扫描兜底
   （覆盖"刚配完 WiFi、还没设过桥接"的全新设备）。
 - **设置设备地址…**：手动填时钟的 IP（开机时屏幕会显示；有自动配对后基本用不上）
-- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 行情
+- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 行情；Grok、
+  Kimi 默认隐藏，在“AI 额度设置”中启用后可固定显示
 - **行情刷新间隔**：10/30/60/120 秒；同时控制桥接端报价拉取和收藏标的轮换
 - **行情标的**：上证、恒生、SPX、NDX、KOSPI 等预设，或输入 sh/sz/bj/hk/us/kr 代码
 - **音乐播放**：显示 Mac 当前播放的专辑封面、歌曲、歌手和进度
 - **更换桌宠动画…**：内置 [petdex.dev](https://petdex.dev) 画廊（3300+ 开源桌宠），
   搜索 → 选动画（待机/跑步/挥手…9 种）→ 预览 → 一键上传到设备
+- **桌宠外观**：切换经典宠物 / 照片定制咖色边牧，并选择 70% / 85% / 100% 显示大小
 - **恢复默认动画**：删掉自定义 GIF，回到固件内置形象
 - **把本机设为设备桥接**：一键把设备的 Bridge host 指到这台 Mac
 
@@ -89,13 +96,16 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
 
 ### 数据来源与局限
 
-- **额度（两家都是真实值）**：app 每 2 分钟调一次官方用量接口（见开头），拿到
-  Claude 5h/周窗口与 Codex 周窗口的已用百分比和重置时间，合并进 `/status` 下发给设备。接口 429 限流时
+- **额度（四家都是真实值）**：app 每 2 分钟调一次各自用量接口（见开头），拿到
+  Claude 5h/周、Codex 周、Grok Build 周、Kimi Code 5h/周窗口的已用百分比和重置时间。
+  四家额度都合并进 `/status` 下发给设备；Grok/Kimi 的设备页面默认关闭，用户在桥接
+  App 设置中启用后可固定显示。接口 429 限流时
   自动退避 5 分钟并沿用上一次的数值。
 - Claude 的 OAuth token 存在 Keychain，app 通过 `security` CLI 读取，第一次运行
   macOS 可能弹一次授权框（选"始终允许"即可）；`~/.claude/.credentials.json` 存在时
   优先读文件。
-- 若凭据缺失/过期，额度显示"?"，工作状态仍照常工作（来自日志，不依赖网络）。
+- Kimi 的后备 API Key 在 macOS 存入 Keychain，在 Windows 存入 Credential Manager；
+  不写入偏好设置 JSON。若凭据缺失/过期，额度显示"?"，工作状态仍照常工作。
 
 ## 2. 烧录 ESP8266 固件
 
@@ -164,7 +174,8 @@ pio device monitor -e nodemcuv2 -b 115200
 
 视觉元素：
 
-- 屏幕右上角：对应角色的像素动画（Claude = 跑步的 Dario，Codex = 戴耳机的宠物），
+- 屏幕右上角：对应角色的像素动画（Claude = 跑步的 Dario；Codex 忙时严格左侧面奔跑，
+  空闲时坐下禅定），
   仅在该角色 `working` 时播放动画，否则停在静止帧。
 - 角色下方显示本机自然日的 token 与估算成本（`TODAY` 行放大显示，不再附加 `tok`）。统计窗口固定为本机时区 `00:01 <= t < 次日 00:00`；
   价格优先读取 LiteLLM 公共模型目录并落盘缓存，离线时使用内置常用模型价格。遇到未知模型
@@ -199,16 +210,20 @@ pio device monitor -e nodemcuv2 -b 115200
 两条路最终都走同一条链路：设备收到 GIF 后**自己在板上解码并缩放**，立刻替换该角色的
 动画，重启后也记得，**不需要重新编译或烧录固件**。
 
+固件还内置“经典宠物”和照片定制的“咖色边牧”两套形象。`/api/pet` 会持久化预设与
+60%–100% 缩放比例；切换预设或大小也不需要重烧固件。
+
 ### 设备 HTTP API（Mac app 用的就是这套）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music\|btc` 切换屏幕显示（`btc` 为行情兼容名） |
+| POST | `/api/display` | `mode=auto\|claude\|codex\|grok\|kimi\|net\|music\|btc` 切换屏幕显示（`btc` 为行情兼容名） |
+| POST | `/api/pet` | `preset=classic\|border-collie&scale=60..100` 切换并持久化内置宠物和大小 |
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
-| GET | `/sprite/claude/raw`、`/sprite/codex/raw` | 当前生效动画的原始帧流 `[1B帧数][RGB565大端帧...]`（镜像窗口用）|
+| GET | `/sprite/claude/raw`、`/sprite/codex/raw`、`/sprite/grok/raw`、`/sprite/kimi/raw` | 当前生效动画的原始帧流 `[1B帧数][RGB565大端帧...]`（镜像窗口用）|
 
 `/api/info` 里的 `sprite_rev` 在每次上传/重置动画后自增，镜像端据此决定是否重新拉帧。
 

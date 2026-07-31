@@ -26,6 +26,26 @@ final class QuotaDisplayTests: XCTestCase {
         XCTAssertNil(encoded["primary_reset_min"])
     }
 
+    func testBridgeStatusJSONContainsOptionalScreenProviders() throws {
+        var snapshot = Snapshot(claude: ClaudeStatus(), codex: CodexStatus(), ts: 1)
+        snapshot.grok.weeklyPct = 63
+        snapshot.grok.weeklyResetMin = 720
+        snapshot.kimi.primaryPct = 25
+        snapshot.kimi.primaryResetMin = 180
+        snapshot.kimi.weeklyPct = 41
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: snapshot.jsonData()) as? [String: Any]
+        )
+        let grok = try XCTUnwrap(root["grok"] as? [String: Any])
+        let kimi = try XCTUnwrap(root["kimi"] as? [String: Any])
+
+        XCTAssertEqual((grok["weekly_pct"] as? NSNumber)?.doubleValue, 63)
+        XCTAssertEqual((grok["weekly_reset_min"] as? NSNumber)?.intValue, 720)
+        XCTAssertEqual((kimi["five_hour_pct"] as? NSNumber)?.doubleValue, 25)
+        XCTAssertEqual((kimi["five_hour_reset_min"] as? NSNumber)?.intValue, 180)
+        XCTAssertEqual((kimi["weekly_pct"] as? NSNumber)?.doubleValue, 41)
+    }
+
     func testCodexWeeklyWindowAcceptsCurrentPrimaryShape() {
         let limits: [String: Any] = [
             "primary": [
@@ -57,5 +77,44 @@ final class QuotaDisplayTests: XCTestCase {
             "secondary": NSNull(),
         ]
         XCTAssertNil(codexWeeklyWindow(from: limits))
+    }
+
+    func testGrokWeeklyCreditsPayload() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "config": [
+                "creditUsagePercent": 62.5,
+                "billingPeriodEnd": "2026-08-03T00:00:00Z",
+                "currentPeriod": ["type": "USAGE_PERIOD_TYPE_WEEKLY"],
+            ],
+        ])
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-02T00:00:00Z"))
+        let usage = try XCTUnwrap(UsageFetcher.parseGrokUsage(data, now: now))
+        XCTAssertEqual(usage.weeklyPct, 62.5)
+        XCTAssertEqual(usage.weeklyResetMin, 24 * 60)
+    }
+
+    func testGrokRejectsNonWeeklyPeriod() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "config": [
+                "creditUsagePercent": 10,
+                "currentPeriod": ["type": "USAGE_PERIOD_TYPE_DAILY"],
+            ],
+        ])
+        XCTAssertNil(UsageFetcher.parseGrokUsage(data))
+    }
+
+    func testKimiFiveHourAndWeeklyPayload() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "usage": ["limit": "1000", "used": "250", "resetTime": "2026-08-07T00:00:00Z"],
+            "limits": [[
+                "window": ["duration": 300, "timeUnit": "TIME_UNIT_MINUTE"],
+                "detail": ["limit": "100", "remaining": "60", "resetTime": "2026-08-01T05:00:00Z"],
+            ]],
+        ])
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-01T00:00:00Z"))
+        let usage = try XCTUnwrap(UsageFetcher.parseKimiUsage(data, now: now))
+        XCTAssertEqual(usage.primaryPct, 40)
+        XCTAssertEqual(usage.primaryResetMin, 300)
+        XCTAssertEqual(usage.weeklyPct, 25)
     }
 }

@@ -54,4 +54,12 @@ static class Settings
             }
         }
     }
+
+    public static bool GetBool(string key, bool fallback = true)
+    {
+        var raw = Get(key);
+        return raw.Length == 0 ? fallback : bool.TryParse(raw, out var value) ? value : fallback;
+    }
+
+    public static void SetBool(string key, bool value) => Set(key, value.ToString());
 }

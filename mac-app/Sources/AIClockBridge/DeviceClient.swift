@@ -8,12 +8,17 @@ struct DeviceInfo {
     var ip = ""
     var ssid = ""
     var bridge = ""
-    var mode = "auto"       // configured: auto | claude | codex | net | music | btc (行情兼容名)
+    var mode = "auto"       // configured: auto | claude | codex | grok | kimi | net | music | btc
     var effective = "auto"  // what's actually on screen (AUTO may promote to music)
     var showing = ""
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
     var brightness = 100    // backlight 0-100 (0 = off)
+    var petPreset = "classic"
+    var petScale = 85
+    var spriteW = 120, spriteH = 120
+    var spriteDisplayW = 102, spriteDisplayH = 102
+    var spriteCustom = false
     var wired = false       // current response came over the USB serial link
     var claudeCustomSprite = false
     var codexCustomSprite = false
@@ -96,7 +101,7 @@ final class DeviceClient {
         }.resume()
     }
 
-    /// POST /api/display  mode=auto|claude|codex|net|music|btc
+    /// POST /api/display  mode=auto|claude|codex|grok|kimi|net|music|btc
     static func setDisplayMode(_ mode: String, completion: @escaping (Error?) -> Void) {
         if SerialLink.shared?.sendCommand(["display": mode]) == true {
             DispatchQueue.main.async { completion(nil) }
@@ -121,6 +126,19 @@ final class DeviceClient {
             return
         }
         postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
+    }
+
+    static func setPetAppearance(preset: String, scale: Int,
+                                 completion: @escaping (Error?) -> Void) {
+        if SerialLink.shared?.sendCommand([
+            "pet_preset": preset, "pet_scale": String(scale),
+        ]) == true {
+            DispatchQueue.main.async { completion(nil) }
+            return
+        }
+        postForm(path: "api/pet", fields: [
+            "preset": preset, "scale": String(scale),
+        ], completion: completion)
     }
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
@@ -188,6 +206,15 @@ final class DeviceClient {
         info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
         info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
         info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
+        info.petPreset = obj["pet_preset"] as? String ?? "classic"
+        info.petScale = (obj["pet_scale"] as? NSNumber)?.intValue ?? 85
+        info.spriteW = (obj["sprite_w"] as? NSNumber)?.intValue ?? 120
+        info.spriteH = (obj["sprite_h"] as? NSNumber)?.intValue ?? 120
+        info.spriteDisplayW = (obj["sprite_display_w"] as? NSNumber)?.intValue
+            ?? Int((Double(info.spriteW) * Double(info.petScale) / 100).rounded())
+        info.spriteDisplayH = (obj["sprite_display_h"] as? NSNumber)?.intValue
+            ?? Int((Double(info.spriteH) * Double(info.petScale) / 100).rounded())
+        info.spriteCustom = obj["sprite_custom"] as? Bool ?? false
         info.wired = obj["wired"] as? Bool ?? false
         let claude = obj["claude"] as? [String: Any]
         let codex = obj["codex"] as? [String: Any]

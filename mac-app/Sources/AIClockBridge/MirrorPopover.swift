@@ -89,7 +89,7 @@ final class MirrorView: NSView {
     var line1 = "5h -"
     var line2 = "Weekly -"
     var dailyLine = "TODAY 0  ~$0.00"
-    var showingClaude = true
+    var showingProvider = "claude"
     var deviceOK = false
     // net-mode mirror: same scrolling area-chart model as the firmware —
     // one column per 250ms sample, 224-column (56s) window, shared "nice"
@@ -218,8 +218,18 @@ final class MirrorView: NSView {
         }
 
         // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
-        if let logo = Self.claudeLogo, let logo2 = Self.codexLogo {
-            (showingClaude ? logo : logo2).draw(in: NSRect(x: 14, y: 18, width: 40, height: 40))
+        if showingProvider == "claude", let logo = Self.claudeLogo {
+            logo.draw(in: NSRect(x: 14, y: 18, width: 40, height: 40))
+        } else if showingProvider == "codex", let logo = Self.codexLogo {
+            logo.draw(in: NSRect(x: 14, y: 18, width: 40, height: 40))
+        } else if showingProvider == "grok" || showingProvider == "kimi" {
+            let logoText = showingProvider == "grok" ? "GROK" : "KIMI"
+            let logoColor = showingProvider == "grok" ? NSColor.white : NSColor.systemCyan
+            (logoText as NSString).draw(in: NSRect(x: 14, y: 22, width: 52, height: 24),
+                                        withAttributes: [
+                                            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .bold),
+                                            .foregroundColor: logoColor,
+                                        ])
         }
 
         // quota text
@@ -621,7 +631,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.applyScene(info)
                 self.ensureSprite(info)
                 self.syncBrightness(info)
-                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4, "btc": 5][info.mode] ?? 0
+                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4, "btc": 5][info.mode] ?? -1
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
@@ -678,8 +688,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.needsDisplay = true
             return
         }
-        mirror.showingClaude = info.showing != "codex"
-        if mirror.showingClaude {
+        mirror.showingProvider = info.showing
+        if info.showing == "claude" {
             let pct = snap.claude.fiveHourPct
                 ?? (snap.claude.sessionWindowMin > 0
                     ? 100.0 * Double(snap.claude.sessionMin) / Double(snap.claude.sessionWindowMin) : 0)
@@ -689,13 +699,27 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.line2 = "Weekly " + Self.pctText(snap.claude.sevenDayPct)
             mirror.needsInput = snap.claude.needsInput
             mirror.dailyLine = Self.dailyLine(tokens: snap.claude.tokensToday, cost: snap.claude.costToday)
-        } else {
+        } else if info.showing == "codex" {
             mirror.ringPct = snap.codex.weeklyPct ?? 0
             mirror.ringLevel = codexWeeklyBorderLevel(snap.codex.weeklyPct)
             mirror.line1 = "Weekly"
             mirror.line2 = Self.pctText(snap.codex.weeklyPct)
             mirror.needsInput = snap.codex.needsInput
             mirror.dailyLine = Self.dailyLine(tokens: snap.codex.tokensToday, cost: snap.codex.costToday)
+        } else if info.showing == "grok" {
+            mirror.ringPct = snap.grok.weeklyPct ?? 0
+            mirror.ringLevel = codexWeeklyBorderLevel(snap.grok.weeklyPct)
+            mirror.line1 = "Weekly"
+            mirror.line2 = Self.pctText(snap.grok.weeklyPct)
+            mirror.needsInput = false
+            mirror.dailyLine = ""
+        } else {
+            mirror.ringPct = snap.kimi.primaryPct ?? snap.kimi.weeklyPct ?? 0
+            mirror.ringLevel = codexWeeklyBorderLevel(snap.kimi.weeklyPct)
+            mirror.line1 = "5h " + Self.pctText(snap.kimi.primaryPct)
+            mirror.line2 = "Weekly " + Self.pctText(snap.kimi.weeklyPct)
+            mirror.needsInput = false
+            mirror.dailyLine = ""
         }
         mirror.needsDisplay = true
     }
@@ -714,11 +738,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func ensureSprite(_ info: DeviceInfo) {
-        let slot = info.showing == "codex" ? "codex" : "claude"
-        let w = slot == "claude" ? info.claudeW : info.codexW
-        let h = slot == "claude" ? info.claudeH : info.codexH
-        let drawW = slot == "claude" ? info.claudeDisplayW : info.codexDisplayW
-        let drawH = slot == "claude" ? info.claudeDisplayH : info.codexDisplayH
+        let slot = ["claude", "codex", "grok", "kimi"].contains(info.showing)
+            ? info.showing : "codex"
+        let w = info.spriteW
+        let h = info.spriteH
+        let drawW = info.spriteDisplayW
+        let drawH = info.spriteDisplayH
         if let cached = spriteCache[slot], cached.rev == info.spriteRev {
             mirror.frames = cached.frames
             mirror.spriteW = cached.drawW
@@ -734,7 +759,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 let frames = decodeSpriteFrames(data, w: w, h: h)
                 guard !frames.isEmpty else { return }
                 self.spriteCache[slot] = (info.spriteRev, frames, w, h, drawW, drawH)
-                if (self.lastInfo?.showing == "codex" ? "codex" : "claude") == slot {
+                if self.lastInfo?.showing == slot {
                     self.mirror.frames = frames
                     self.mirror.spriteW = drawW
                     self.mirror.spriteH = drawH
@@ -749,7 +774,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var ludicrousStartedAt: Date?
 
     private func updateFastAnimation(info: DeviceInfo, snapshot: Snapshot) {
-        let agent = info.showing == "codex" ? "codex" : "claude"
+        guard info.showing == "claude" || info.showing == "codex" else { return }
+        let agent = info.showing
         let sequences = ["claude": snapshot.claude.fastTaskSeq, "codex": snapshot.codex.fastTaskSeq]
         guard !baselineFastSeq.isEmpty else { baselineFastSeq = sequences; return }
         let seq = sequences[agent] ?? 0
@@ -791,9 +817,16 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         guard !mirror.frames.isEmpty else { return }
         let snap = service.snapshot()
         let working = info.showing == "codex"
-            ? snap.codex.status == "working" : snap.claude.status == "working"
+            ? snap.codex.status == "working"
+            : info.showing == "claude" && snap.claude.status == "working"
         if working {
-            mirror.frameIdx = (mirror.frameIdx + 1) % mirror.frames.count
+            let reservesIdle = !info.spriteCustom
+                && (info.petPreset == "border-collie" || info.showing != "claude")
+            if reservesIdle, mirror.frames.count > 1 {
+                mirror.frameIdx = 1 + (mirror.frameIdx % (mirror.frames.count - 1))
+            } else {
+                mirror.frameIdx = (mirror.frameIdx + 1) % mirror.frames.count
+            }
         } else if mirror.frameIdx != 0 {
             mirror.frameIdx = 0
         }
@@ -801,7 +834,9 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "net", "music", "btc"][max(0, modeControl.selectedSegment)]
+        let modes = ["auto", "claude", "codex", "net", "music", "btc"]
+        guard modeControl.selectedSegment >= 0, modeControl.selectedSegment < modes.count else { return }
+        let mode = modes[modeControl.selectedSegment]
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }

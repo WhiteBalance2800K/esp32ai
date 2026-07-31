@@ -1,7 +1,7 @@
 #pragma once
 
 // ---- Firmware version (shown on the first-time WiFi setup screen & /api/info) ----
-#define FW_VERSION_ESP32_C3 "0.4.6-c3.11"
+#define FW_VERSION_ESP32_C3 "0.4.6-c3.13"
 #if defined(ESP32)
 #define FW_VERSION FW_VERSION_ESP32_C3
 #else
@@ -22,6 +22,10 @@
 #define BRIGHTNESS_FILE "/brightness.txt"
 #define BRIGHTNESS_DEFAULT 100
 #define BRIGHTNESS_PWM_FREQ 2000 // Hz; high enough to avoid visible flicker when dim
+
+// ---- Pet appearance ----
+#define PET_CONFIG_FILE "/pet.txt"
+#define PET_SCALE_DEFAULT 85
 
 // ---- Display layout (240x240 ST7789) ----
 #define SCREEN_W 240

@@ -42,7 +42,7 @@ at compile time and again when generating the Web image. See the
 
 To use the bundled flasher locally, run `python3 -m http.server 8000` from the repository root and
 open `http://localhost:8000/web-flasher/` in desktop Chrome or Edge. The verified build is
-`0.4.6-c3.5`.
+`0.4.6-c3.13`.
 
 > This port is based on [pengchujin/esp8266-ai](https://github.com/pengchujin/esp8266-ai).
 > ESP32-C3 is now the default target; the original `nodemcuv2` ESP8266 target remains available.
@@ -72,7 +72,11 @@ Open **[mac.qust.me/#flash](https://mac.qust.me/#flash)** in Chrome / Edge, plug
 
 > Serial port not showing up? On Windows install the [CH340 driver](https://www.wch.cn/downloads/CH341SER_EXE.html); macOS has it built in. Try another USB cable (many are charge-only). More troubleshooting in the [website FAQ](https://mac.qust.me/#flash-faq).
 >
-> Command-line folks can also flash `esp8266-ai-firmware-*.bin` from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) to address `0x0` with esptool.
+> For command-line flashing, download the four ESP32-C3 segments from this
+> project's [Releases](https://github.com/WhiteBalance2800K/esp32ai/releases/latest)
+> and write them at the offsets listed in the release. For normal updates,
+> prefer the online Web Flasher without enabling erase. Use `*-full.bin` only
+> for first-time installation or an explicit full recovery.
 
 ### Step 2 · Connect WiFi
 
@@ -80,7 +84,7 @@ On first boot the device opens a hotspot named **`AI-Clock-Setup`**: join it fro
 
 ### Step 3 · Install the bridge app
 
-Download from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) and open:
+Download from [Releases](https://github.com/WhiteBalance2800K/esp32ai/releases/latest) and open:
 
 - **macOS**: `AIClockBridge-*-macOS.dmg`, drag into Applications (ad-hoc signed; on first launch allow it in "System Settings → Privacy & Security" and grant local-network access)
 - **Windows**: `AIClockBridge-*-Windows-x64.exe`, just double-click

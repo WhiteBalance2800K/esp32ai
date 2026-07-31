@@ -7,16 +7,21 @@
 
 - **左键托盘图标** → ESP32-C3 / ESP8266 屏幕实时镜像（额度环 + 桌宠动画 + 网速图 + 音乐页 + 行情页，
   与设备渲染同一份数据），底部附 自动/Claude/Codex/网速/音乐/行情 快速切换
-- **右键托盘图标** → 控制菜单：Claude 5h/周额度、Codex Weekly 额度、今日 Token 与折算金额、
-  自动查找并配对设备、设置设备地址、屏幕显示模式、petdex 桌宠画廊、恢复默认动画、
+- **右键托盘图标** → 控制菜单：Claude 5h/周、Codex Weekly、Grok Build Weekly、
+  Kimi Code 5h/周额度、今日 Token 与折算金额、
+  自动查找并配对设备、设置设备地址、屏幕显示模式、经典宠物 / 咖色边牧及大小、
+  petdex 桌宠画廊、恢复默认动画、
   把本机设为设备桥接、桥接服务地址
+- “屏幕显示”默认只列出 Claude / Codex 两个 AI 提供商；Grok / Kimi 在
+  “AI 额度设置”中按需开启后才出现在固定显示列表
 - 本地 HTTP 服务 `0.0.0.0:8765`：`/status`、`/net`、`/music`、`/music/cover.raw`、
   `/music/text.raw`、`/btc`、`/btc/version`、`/btc/frame.rle`、`POST /event`
   （Claude Code / Codex hooks 秒级状态推送）
 - 数据来源同 Mac 版：`%USERPROFILE%\.claude\projects` / `%USERPROFILE%\.codex\sessions`
   的 JSONL 日志 + 各自官方用量接口（凭据读
   `%USERPROFILE%\.claude\.credentials.json` 和 `%USERPROFILE%\.codex\auth.json`，
-  token 只发给各自官方 API）
+  token 只发给各自用量 API）。Grok 自动读取 Grok CLI 或 Pi 的 xAI 登录；Kimi
+  优先读取 Kimi Code CLI 登录，也可在“AI 额度设置”中配置后备 API Key
 - 音乐页读系统级 Now Playing（WinRT `GlobalSystemMediaTransportControlsSessionManager`，
   Spotify / 浏览器 / 本地播放器都能识别）；网速取物理网卡（以太网/WiFi）字节计数，
   4Hz 采样，排除 VPN/虚拟网卡
@@ -58,7 +63,8 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 curl.exe -s http://localhost:8765/status | python -m json.tool
 ```
 
-配置持久化在 `%APPDATA%\AIClockBridge\settings.json`（设备地址等）。
+配置持久化在 `%APPDATA%\AIClockBridge\settings.json`（设备地址、显示开关等）。
+Kimi API Key 单独保存在 Windows Credential Manager，不会明文写入该 JSON。
 
 ## 代码结构
 

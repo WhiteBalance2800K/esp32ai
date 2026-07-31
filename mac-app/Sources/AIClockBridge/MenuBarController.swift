@@ -15,10 +15,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private let claudeUsageItem = NSMenuItem(title: "Claude …", action: nil, keyEquivalent: "")
     private let codexUsageItem = NSMenuItem(title: "Codex …", action: nil, keyEquivalent: "")
+    private let grokUsageItem = NSMenuItem(title: "Grok Build …", action: nil, keyEquivalent: "")
+    private let kimiUsageItem = NSMenuItem(title: "Kimi Code …", action: nil, keyEquivalent: "")
     private let deviceInfoItem = NSMenuItem(title: "设备：未设置", action: nil, keyEquivalent: "")
     private var modeItems: [String: NSMenuItem] = [:]
     private var marketInstrumentItems: [String: NSMenuItem] = [:]
     private let instrumentMenu = NSMenu()
+    private static let showGrokKey = "show_grok_usage"
+    private static let showKimiKey = "show_kimi_usage"
+    private static let enableGrokScreenKey = "enable_grok_screen"
+    private static let enableKimiScreenKey = "enable_kimi_screen"
+    private var petPresetItems: [String: NSMenuItem] = [:]
+    private var petScaleItems: [Int: NSMenuItem] = [:]
+    private var currentPetPreset = "classic"
+    private var currentPetScale = 85
 
     init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
          nowPlaying: NowPlayingMonitor, market: MarketMonitor, port: UInt16) {
@@ -71,8 +81,40 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         claudeUsageItem.isEnabled = false
         codexUsageItem.isEnabled = false
+        grokUsageItem.isEnabled = false
+        kimiUsageItem.isEnabled = false
         menu.addItem(claudeUsageItem)
         menu.addItem(codexUsageItem)
+        menu.addItem(grokUsageItem)
+        menu.addItem(kimiUsageItem)
+
+        let quotaMenu = NSMenu()
+        for (title, key) in [("显示 Grok Build 额度", Self.showGrokKey),
+                             ("显示 Kimi Code 额度", Self.showKimiKey)] {
+            let item = NSMenuItem(title: title, action: #selector(toggleQuotaProvider(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = key
+            item.state = Self.preference(key) ? .on : .off
+            quotaMenu.addItem(item)
+        }
+        quotaMenu.addItem(.separator())
+        for (title, key, mode) in [
+            ("在屏幕菜单显示 Grok", Self.enableGrokScreenKey, "grok"),
+            ("在屏幕菜单显示 Kimi", Self.enableKimiScreenKey, "kimi"),
+        ] {
+            let item = NSMenuItem(title: title, action: #selector(toggleScreenProvider(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = ["key": key, "mode": mode]
+            item.state = Self.preference(key, fallback: false) ? .on : .off
+            quotaMenu.addItem(item)
+        }
+        quotaMenu.addItem(.separator())
+        quotaMenu.addItem(makeItem("设置 Kimi Code API Key…", #selector(setKimiAPIKey)))
+        quotaMenu.addItem(makeItem("清除 Kimi Code API Key", #selector(clearKimiAPIKey)))
+        let quotaItem = NSMenuItem(title: "AI 额度设置", action: nil, keyEquivalent: "")
+        quotaItem.submenu = quotaMenu
+        menu.addItem(quotaItem)
         menu.addItem(.separator())
 
         deviceInfoItem.isEnabled = false
@@ -84,12 +126,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         let displayMenu = NSMenu()
         for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-                              ("固定 Codex", "codex"), ("网速曲线", "net"),
+                              ("固定 Codex", "codex"), ("固定 Grok", "grok"),
+                              ("固定 Kimi", "kimi"), ("网速曲线", "net"),
                               ("音乐播放", "music"), ("行情", "btc")] {
             let item = NSMenuItem(title: title, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = mode
             modeItems[mode] = item
+            if mode == "grok" {
+                item.isHidden = !Self.preference(Self.enableGrokScreenKey, fallback: false)
+            } else if mode == "kimi" {
+                item.isHidden = !Self.preference(Self.enableKimiScreenKey, fallback: false)
+            }
             displayMenu.addItem(item)
         }
         let displayItem = NSMenuItem(title: "屏幕显示", action: nil, keyEquivalent: "")
@@ -130,6 +178,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         menu.addItem(makeItem("更换桌宠动画…（petdex）", #selector(openPetPicker)))
+
+        let petMenu = NSMenu()
+        for (title, preset) in [("经典宠物", "classic"), ("咖色边牧", "border-collie")] {
+            let item = NSMenuItem(title: title, action: #selector(setPetPreset(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset
+            petPresetItems[preset] = item
+            petMenu.addItem(item)
+        }
+        petMenu.addItem(.separator())
+        for (title, scale) in [("小号 70%", 70), ("标准 85%", 85), ("大号 100%", 100)] {
+            let item = NSMenuItem(title: title, action: #selector(setPetScale(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = scale
+            petScaleItems[scale] = item
+            petMenu.addItem(item)
+        }
+        let petItem = NSMenuItem(title: "桌宠外观", action: nil, keyEquivalent: "")
+        petItem.submenu = petMenu
+        menu.addItem(petItem)
 
         let resetMenu = NSMenu()
         for (title, slot) in [("Claude 恢复默认", "claude"), ("Codex 恢复默认", "codex")] {
@@ -175,6 +243,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let snap = service.snapshot()
         claudeUsageItem.title += Self.todaySuffix(tokens: snap.claude.tokensToday, cost: snap.claude.costToday)
         codexUsageItem.title += Self.todaySuffix(tokens: snap.codex.tokensToday, cost: snap.codex.costToday)
+        grokUsageItem.title = Self.usageLine(name: "Grok Build", u: usage.grok, weeklyLabel: "周",
+                                            showPrimary: false)
+        kimiUsageItem.title = Self.usageLine(name: "Kimi Code", u: usage.kimi, weeklyLabel: "周",
+                                            showPrimary: true)
+        grokUsageItem.isHidden = !Self.preference(Self.showGrokKey)
+        kimiUsageItem.isHidden = !Self.preference(Self.showKimiKey)
+    }
+
+    private static func preference(_ key: String, fallback: Bool = true) -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key)
     }
 
     private static func usageLine(name: String, u: ProviderUsage, weeklyLabel: String,
@@ -223,11 +302,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 let showing = info.mode == "net" ? "网速"
                     : info.mode == "music" ? "音乐"
                     : info.mode == "btc" ? "行情"
-                    : (info.showing == "claude" ? "Claude" : "Codex")
+                    : info.showing == "claude" ? "Claude"
+                    : info.showing == "codex" ? "Codex"
+                    : info.showing == "grok" ? "Grok"
+                    : info.showing == "kimi" ? "Kimi" : "未知"
                 let endpoint = info.wired ? "USB 串口" : info.ip
                 self.deviceInfoItem.title =
                     "设备：\(endpoint) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"
                 for (mode, item) in self.modeItems { item.state = mode == info.mode ? .on : .off }
+                self.petPresetItems.values.forEach { $0.state = .off }
+                self.petPresetItems[info.petPreset]?.state = .on
+                self.petScaleItems.values.forEach { $0.state = .off }
+                self.petScaleItems[info.petScale]?.state = .on
+                self.currentPetPreset = info.petPreset
+                self.currentPetScale = info.petScale
             case .failure:
                 self.deviceInfoItem.title = host.isEmpty
                     ? "设备：USB 串口（无法读取状态）"
@@ -275,6 +363,71 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         usage.refresh()
         refreshUsageLines()
         refreshDeviceSection()
+    }
+
+    @objc private func toggleQuotaProvider(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        let enabled = sender.state != .on
+        UserDefaults.standard.set(enabled, forKey: key)
+        sender.state = enabled ? .on : .off
+        refreshUsageLines()
+        if enabled { usage.refresh() }
+    }
+
+    @objc private func toggleScreenProvider(_ sender: NSMenuItem) {
+        guard let values = sender.representedObject as? [String: String],
+              let key = values["key"], let mode = values["mode"] else { return }
+        let enabled = sender.state != .on
+        UserDefaults.standard.set(enabled, forKey: key)
+        sender.state = enabled ? .on : .off
+        modeItems[mode]?.isHidden = !enabled
+        if !enabled, modeItems[mode]?.state == .on {
+            DeviceClient.setDisplayMode("auto") { [weak self] _ in self?.refreshDeviceSection() }
+        }
+    }
+
+    @objc private func setPetPreset(_ sender: NSMenuItem) {
+        guard let preset = sender.representedObject as? String else { return }
+        DeviceClient.setPetAppearance(preset: preset, scale: currentPetScale) { [weak self] error in
+            if let error { Self.toast("设置失败", error.localizedDescription) }
+            self?.refreshDeviceSection()
+        }
+    }
+
+    @objc private func setPetScale(_ sender: NSMenuItem) {
+        guard let scale = sender.representedObject as? Int else { return }
+        DeviceClient.setPetAppearance(preset: currentPetPreset, scale: scale) { [weak self] error in
+            if let error { Self.toast("设置失败", error.localizedDescription) }
+            self?.refreshDeviceSection()
+        }
+    }
+
+    @objc private func setKimiAPIKey() {
+        let alert = NSAlert()
+        alert.messageText = "Kimi Code API Key"
+        alert.informativeText = "优先自动使用有效的 Kimi Code CLI 登录；这里的 Key 仅作后备，并保存到 macOS 钥匙串。"
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        input.placeholderString = "粘贴 Kimi Code API Key"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if SecureCredentialStore.save(input.stringValue, account: "kimi-code-api-key") {
+            Self.toast("已保存", "Kimi Code API Key 已安全保存到 macOS 钥匙串。")
+            usage.refresh()
+        } else {
+            Self.toast("保存失败", "无法写入 macOS 钥匙串。")
+        }
+    }
+
+    @objc private func clearKimiAPIKey() {
+        if SecureCredentialStore.save(nil, account: "kimi-code-api-key") {
+            Self.toast("已清除", "桥接 App 仍会优先自动读取 Kimi Code CLI 登录。")
+            usage.refresh()
+        } else {
+            Self.toast("清除失败", "无法更新 macOS 钥匙串。")
+        }
     }
 
     @objc private func setDeviceAddress() {

@@ -28,7 +28,7 @@ sealed class MirrorControl : Control
     public string Line2 = "Weekly -";
     public string DailyLine = "TODAY 0  ~$0.00";
     public int RingLevel; // 0 green, 1 yellow, 2 red
-    public bool ShowingClaude = true;
+    public string ShowingProvider = "claude";
     public bool DeviceOK;
     // net-mode mirror: same scrolling area-chart model as the firmware —
     // one column per 250ms sample, 224-column (56s) window, shared "nice"
@@ -164,7 +164,17 @@ sealed class MirrorControl : Control
         }
 
         // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
-        g.DrawImage(ShowingClaude ? ClaudeLogo : CodexLogo, new Rectangle(14, 18, 40, 40));
+        if (ShowingProvider == "claude")
+            g.DrawImage(ClaudeLogo, new Rectangle(14, 18, 40, 40));
+        else if (ShowingProvider == "codex")
+            g.DrawImage(CodexLogo, new Rectangle(14, 18, 40, 40));
+        else if (ShowingProvider is "grok" or "kimi")
+        {
+            using var logoFont = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var logoBrush = new SolidBrush(ShowingProvider == "grok" ? Color.White : Color.Cyan);
+            g.DrawString(ShowingProvider.ToUpperInvariant(), logoFont, logoBrush,
+                         new RectangleF(14, 22, 52, 24));
+        }
 
         // quota text
         using (var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel))
@@ -602,9 +612,10 @@ sealed class MirrorForm : Form
         ApplyScene(info);
         EnsureSprite(info);
         SyncBrightness(info);
-        var modeIdx = Math.Max(0, Array.IndexOf(Modes, info.Mode));
         _applyingMode = true;
-        _modeButtons[modeIdx].Checked = true;
+        var modeIdx = Array.IndexOf(Modes, info.Mode);
+        foreach (var button in _modeButtons) button.Checked = false;
+        if (modeIdx >= 0) _modeButtons[modeIdx].Checked = true;
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "网速曲线"
@@ -651,8 +662,8 @@ sealed class MirrorForm : Form
         }
         var snap = _service.Snapshot();
         UpdateFastAnimation(info, snap);
-        _mirror.ShowingClaude = info.Showing != "codex";
-        if (_mirror.ShowingClaude)
+        _mirror.ShowingProvider = info.Showing;
+        if (info.Showing == "claude")
         {
             var pct = snap.Claude.FiveHourPct
                 ?? (snap.Claude.SessionWindowMin > 0
@@ -664,7 +675,7 @@ sealed class MirrorForm : Form
             _mirror.NeedsInput = snap.Claude.NeedsInput;
             _mirror.DailyLine = DailyLine(snap.Claude.TokensToday, snap.Claude.CostToday);
         }
-        else
+        else if (info.Showing == "codex")
         {
             _mirror.RingPct = snap.Codex.WeeklyPct ?? 0;
             _mirror.RingLevel = snap.Codex.WeeklyPct >= 75 ? 2 : snap.Codex.WeeklyPct >= 50 ? 1 : 0;
@@ -673,8 +684,28 @@ sealed class MirrorForm : Form
             _mirror.NeedsInput = snap.Codex.NeedsInput;
             _mirror.DailyLine = DailyLine(snap.Codex.TokensToday, snap.Codex.CostToday);
         }
+        else if (info.Showing == "grok")
+        {
+            _mirror.RingPct = snap.Grok.WeeklyPct ?? 0;
+            _mirror.RingLevel = RingLevel(snap.Grok.WeeklyPct);
+            _mirror.Line1 = "Weekly";
+            _mirror.Line2 = PctText(snap.Grok.WeeklyPct);
+            _mirror.NeedsInput = false;
+            _mirror.DailyLine = "";
+        }
+        else
+        {
+            _mirror.RingPct = snap.Kimi.PrimaryPct ?? snap.Kimi.WeeklyPct ?? 0;
+            _mirror.RingLevel = RingLevel(snap.Kimi.WeeklyPct);
+            _mirror.Line1 = "5h " + PctText(snap.Kimi.PrimaryPct);
+            _mirror.Line2 = "Weekly " + PctText(snap.Kimi.WeeklyPct);
+            _mirror.NeedsInput = false;
+            _mirror.DailyLine = "";
+        }
         _mirror.Invalidate();
     }
+
+    static int RingLevel(double? pct) => pct >= 75 ? 2 : pct >= 50 ? 1 : 0;
 
     static string PctText(double? pct) =>
         pct.HasValue && pct.Value >= 0 ? $"{(int)pct.Value}%" : "-";
@@ -688,11 +719,12 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
-        var slot = info.Showing == "codex" ? "codex" : "claude";
-        var w = slot == "claude" ? info.ClaudeW : info.CodexW;
-        var h = slot == "claude" ? info.ClaudeH : info.CodexH;
-        var drawW = slot == "claude" ? info.ClaudeDisplayW : info.CodexDisplayW;
-        var drawH = slot == "claude" ? info.ClaudeDisplayH : info.CodexDisplayH;
+        var slot = info.Showing is "claude" or "codex" or "grok" or "kimi"
+            ? info.Showing : "codex";
+        var w = info.SpriteW;
+        var h = info.SpriteH;
+        var drawW = info.SpriteDisplayW;
+        var drawH = info.SpriteDisplayH;
         if (_spriteCache.TryGetValue(slot, out var cached) && cached.Rev == info.SpriteRev)
         {
             _mirror.Frames = cached.Frames;
@@ -715,7 +747,7 @@ sealed class MirrorForm : Form
             if (_spriteCache.TryGetValue(slot, out var old))
                 foreach (var f in old.Frames) f.Dispose();
             _spriteCache[slot] = (rev, frames, w, h, drawW, drawH);
-            if ((_lastInfo?.Showing == "codex" ? "codex" : "claude") == slot)
+            if (_lastInfo?.Showing == slot)
             {
                 _mirror.Frames = frames;
                 _mirror.SpriteW = drawW;
@@ -739,6 +771,7 @@ sealed class MirrorForm : Form
 
     void UpdateFastAnimation(DeviceInfo info, StatusSnapshot snapshot)
     {
+        if (info.Showing is not ("claude" or "codex")) return;
         var sequences = new Dictionary<string, long>
         { ["claude"] = snapshot.Claude.FastTaskSeq, ["codex"] = snapshot.Codex.FastTaskSeq };
         if (_baselineFastSeq.Count == 0)
@@ -746,7 +779,7 @@ sealed class MirrorForm : Form
             foreach (var pair in sequences) _baselineFastSeq[pair.Key] = pair.Value;
             return;
         }
-        var agent = info.Showing == "codex" ? "codex" : "claude";
+        var agent = info.Showing;
         var previous = _baselineFastSeq.TryGetValue(agent, out var value) ? value : sequences[agent];
         foreach (var pair in sequences) _baselineFastSeq[pair.Key] = pair.Value;
         if (sequences[agent] > previous && info.Effective is not ("net" or "music" or "btc"))
@@ -786,10 +819,16 @@ sealed class MirrorForm : Form
         if (_mirror.Frames.Count == 0) return;
         var snap = _service.Snapshot();
         var working = _lastInfo.Showing == "codex"
-            ? snap.Codex.Status == "working" : snap.Claude.Status == "working";
+            ? snap.Codex.Status == "working"
+            : _lastInfo.Showing == "claude" && snap.Claude.Status == "working";
         if (working)
         {
-            _mirror.FrameIdx = (_mirror.FrameIdx + 1) % _mirror.Frames.Count;
+            var reservesIdle = !_lastInfo.SpriteCustom
+                && (_lastInfo.PetPreset == "border-collie" || _lastInfo.Showing != "claude");
+            if (reservesIdle && _mirror.Frames.Count > 1)
+                _mirror.FrameIdx = 1 + (_mirror.FrameIdx % (_mirror.Frames.Count - 1));
+            else
+                _mirror.FrameIdx = (_mirror.FrameIdx + 1) % _mirror.Frames.Count;
         }
         else if (_mirror.FrameIdx != 0)
         {

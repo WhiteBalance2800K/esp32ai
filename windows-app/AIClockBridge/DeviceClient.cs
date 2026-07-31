@@ -15,12 +15,17 @@ class DeviceInfo
     public string Ip = "";
     public string Ssid = "";
     public string Bridge = "";
-    public string Mode = "auto";       // configured: auto | claude | codex | net | music | btc
+    public string Mode = "auto";       // auto | claude | codex | grok | kimi | net | music | btc
     public string Effective = "auto";  // what's actually on screen (AUTO may promote to music)
     public string Showing = "";
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
+    public string PetPreset = "classic";
+    public int PetScale = 85;
+    public int SpriteW = 120, SpriteH = 120;
+    public int SpriteDisplayW = 102, SpriteDisplayH = 102;
+    public bool SpriteCustom;
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
@@ -101,8 +106,17 @@ static class DeviceClient
                 LastUpdateS = Int(root, "last_update_s", -1),
                 SpriteRev = Int(root, "sprite_rev"),
                 Brightness = Int(root, "brightness", 100),
+                PetPreset = Str(root, "pet_preset", "classic"),
+                PetScale = Int(root, "pet_scale", 85),
+                SpriteW = Int(root, "sprite_w", 120),
+                SpriteH = Int(root, "sprite_h", 120),
+                SpriteCustom = Bool(root, "sprite_custom"),
                 Showing = Str(root, "showing"),
             };
+            info.SpriteDisplayW = Int(root, "sprite_display_w",
+                (int)Math.Round(info.SpriteW * info.PetScale / 100.0));
+            info.SpriteDisplayH = Int(root, "sprite_display_h",
+                (int)Math.Round(info.SpriteH * info.PetScale / 100.0));
             info.Effective = Str(root, "effective", info.Mode);
             if (root.TryGetProperty("claude", out var claude))
             {
@@ -128,7 +142,7 @@ static class DeviceClient
         }
     }
 
-    /// POST /api/display  mode=auto|claude|codex|net|music
+    /// POST /api/display  mode=auto|claude|codex|grok|kimi|net|music|btc
     public static Task SetDisplayMode(string mode) =>
         PostForm("api/display", new() { ["mode"] = mode });
 
@@ -139,6 +153,13 @@ static class DeviceClient
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     public static Task SetBrightness(int level) =>
         PostForm("api/brightness", new() { ["level"] = level.ToString() });
+
+    public static Task SetPetAppearance(string preset, int scale) =>
+        PostForm("api/pet", new()
+        {
+            ["preset"] = preset,
+            ["scale"] = scale.ToString(),
+        });
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.

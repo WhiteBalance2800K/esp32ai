@@ -1,12 +1,16 @@
 import Foundation
 
-// Real quota ("额度") for both CLIs, fetched the same way CodexBar does it —
+// Real quota ("额度") for local AI CLIs, fetched the same way CodexBar does it —
 // by reusing the OAuth tokens the CLIs already store locally, no extra login:
 //   Claude: token from macOS Keychain item "Claude Code-credentials" (or
 //           ~/.claude/.credentials.json), then GET
 //           https://api.anthropic.com/api/oauth/usage  (5h + 7d windows)
 //   Codex:  token from ~/.codex/auth.json, then GET
 //           https://chatgpt.com/backend-api/wham/usage (weekly window only)
+//   Grok:   token from ~/.grok/auth.json (fallback: Pi xAI auth), then GET
+//           https://cli-chat-proxy.grok.com/v1/billing?format=credits
+//   Kimi:   fresh ~/.kimi-code credential, then a Keychain/API-key fallback,
+//           GET https://api.kimi.com/coding/v1/usages
 // Tokens never leave this machine except toward their own vendor's API.
 
 struct ProviderUsage {
@@ -19,10 +23,29 @@ struct ProviderUsage {
     var rateLimited = false
 }
 
+private final class UsageBatch {
+    private let lock = NSLock()
+    private var values = Array(repeating: ProviderUsage(), count: 4)
+
+    func set(_ index: Int, _ value: ProviderUsage) {
+        lock.lock()
+        values[index] = value
+        lock.unlock()
+    }
+
+    func snapshot() -> [ProviderUsage] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 final class UsageFetcher {
     private let lock = NSLock()
     private var _claude = ProviderUsage()
     private var _codex = ProviderUsage()
+    private var _grok = ProviderUsage()
+    private var _kimi = ProviderUsage()
     private var timer: Timer?
     private var fetching = false
     private var nextAllowedFetch = Date.distantPast // throttle + 429 backoff
@@ -32,6 +55,8 @@ final class UsageFetcher {
 
     var claude: ProviderUsage { lock.lock(); defer { lock.unlock() }; return _claude }
     var codex: ProviderUsage { lock.lock(); defer { lock.unlock() }; return _codex }
+    var grok: ProviderUsage { lock.lock(); defer { lock.unlock() }; return _grok }
+    var kimi: ProviderUsage { lock.lock(); defer { lock.unlock() }; return _kimi }
 
     /// Called on the main thread after either provider updates.
     var onUpdate: (() -> Void)?
@@ -52,19 +77,40 @@ final class UsageFetcher {
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
-            let claude = self.fetchClaude()
-            let codex = self.fetchCodex()
+            // A slow/missing provider must not delay the other three quota
+            // lines. All requests are independent and finish within one
+            // shared 20-second ceiling instead of four sequential ceilings.
+            let batch = UsageBatch()
+            let group = DispatchGroup()
+            let jobs: [() -> ProviderUsage] = [
+                self.fetchClaude, self.fetchCodex, self.fetchGrok, self.fetchKimi,
+            ]
+            for (index, job) in jobs.enumerated() {
+                group.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    batch.set(index, job())
+                    group.leave()
+                }
+            }
+            group.wait()
+            let values = batch.snapshot()
+            let claude = values[0], codex = values[1], grok = values[2], kimi = values[3]
             self.lock.lock()
             // Keep the last good numbers when a refresh only produced an
             // error (network hiccup / 429) - stale quota beats no quota.
             self._claude = Self.merge(old: self._claude, new: claude)
             self._codex = Self.merge(old: self._codex, new: codex)
+            self._grok = Self.merge(old: self._grok, new: grok)
+            self._kimi = Self.merge(old: self._kimi, new: kimi)
             self.fetching = false
-            let backoff: TimeInterval = claude.rateLimited ? self.rateLimitBackoff : self.minFetchInterval
+            let limited = [claude, codex, grok, kimi].contains { $0.rateLimited }
+            let backoff: TimeInterval = limited ? self.rateLimitBackoff : self.minFetchInterval
             self.nextAllowedFetch = Date().addingTimeInterval(backoff)
             self.lock.unlock()
             if let e = claude.error { FileHandle.standardError.write(Data("[usage] claude: \(e)\n".utf8)) }
             if let e = codex.error { FileHandle.standardError.write(Data("[usage] codex: \(e)\n".utf8)) }
+            if let e = grok.error { FileHandle.standardError.write(Data("[usage] grok: \(e)\n".utf8)) }
+            if let e = kimi.error { FileHandle.standardError.write(Data("[usage] kimi: \(e)\n".utf8)) }
             DispatchQueue.main.async { self.onUpdate?() }
         }
     }
@@ -219,6 +265,175 @@ final class UsageFetcher {
         return nil
     }
 
+    // MARK: - Grok Build (cli-chat-proxy.grok.com)
+
+    private func fetchGrok() -> ProviderUsage {
+        var usage = ProviderUsage()
+        guard let token = Self.grokAccessToken() else {
+            usage.error = "未找到 Grok/Pi 登录凭据，请运行 grok login 或在 Pi 登录 xAI"
+            return usage
+        }
+        var req = URLRequest(url: URL(string:
+            "https://cli-chat-proxy.grok.com/v1/billing?format=credits")!)
+        req.timeoutInterval = 20
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("xai-grok-cli", forHTTPHeaderField: "x-xai-token-auth")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("AIClockBridge", forHTTPHeaderField: "User-Agent")
+        guard let (data, code) = Self.syncRequest(req) else {
+            usage.error = "Grok 用量请求失败"
+            return usage
+        }
+        guard code == 200 else {
+            usage.rateLimited = code == 429
+            usage.error = code == 401 || code == 403
+                ? "Grok 凭据过期，请重新登录 Grok/Pi"
+                : code == 429 ? "Grok 用量接口限流，稍后自动重试"
+                : "Grok 用量接口 HTTP \(code)"
+            return usage
+        }
+        guard let parsed = Self.parseGrokUsage(data) else {
+            usage.error = "Grok 周额度响应解析失败"
+            return usage
+        }
+        return parsed
+    }
+
+    static func parseGrokUsage(_ data: Data, now: Date = Date()) -> ProviderUsage? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let config = root["config"] as? [String: Any],
+              let pct = number(config["creditUsagePercent"]) else { return nil }
+        if let period = config["currentPeriod"] as? [String: Any],
+           let type = period["type"] as? String,
+           type != "USAGE_PERIOD_TYPE_WEEKLY" { return nil }
+        var usage = ProviderUsage()
+        usage.weeklyPct = pct
+        usage.weeklyResetMin = minutesUntil(value: config["billingPeriodEnd"], now: now)
+        usage.fetchedAt = now
+        return usage
+    }
+
+    private static func grokAccessToken() -> String? {
+        let grokPath = ("~/.grok/auth.json" as NSString).expandingTildeInPath
+        if let data = FileManager.default.contents(atPath: grokPath),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let ordered = root.sorted { lhs, rhs in
+                let lp = lhs.key.hasPrefix("https://auth.x.ai::")
+                let rp = rhs.key.hasPrefix("https://auth.x.ai::")
+                return lp && !rp
+            }
+            for (_, raw) in ordered {
+                guard let entry = raw as? [String: Any],
+                      let token = entry["key"] as? String, !token.isEmpty else { continue }
+                if !isExpired(entry["expires_at"]) { return token }
+            }
+        }
+        let piPath = ("~/.pi/agent/auth.json" as NSString).expandingTildeInPath
+        if let data = FileManager.default.contents(atPath: piPath),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let xai = root["xai"] as? [String: Any],
+           let token = xai["access"] as? String, !token.isEmpty,
+           !isExpired(xai["expires"]) { return token }
+        return nil
+    }
+
+    // MARK: - Kimi Code (api.kimi.com/coding/v1/usages)
+
+    private func fetchKimi() -> ProviderUsage {
+        var usage = ProviderUsage()
+        guard let credential = Self.kimiCredential() else {
+            usage.error = "未找到 Kimi Code 登录凭据或 API Key"
+            return usage
+        }
+        var req = URLRequest(url: URL(string: "https://api.kimi.com/coding/v1/usages")!)
+        req.timeoutInterval = 20
+        req.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("AIClockBridge", forHTTPHeaderField: "User-Agent")
+        req.setValue("kimi_code_cli", forHTTPHeaderField: "X-Msh-Platform")
+        req.setValue("AIClockBridge", forHTTPHeaderField: "X-Msh-Version")
+        req.setValue(ProcessInfo.processInfo.hostName.asciiHeaderValue,
+                     forHTTPHeaderField: "X-Msh-Device-Name")
+        req.setValue("macOS".asciiHeaderValue, forHTTPHeaderField: "X-Msh-Device-Model")
+        req.setValue(ProcessInfo.processInfo.operatingSystemVersionString.asciiHeaderValue,
+                     forHTTPHeaderField: "X-Msh-Os-Version")
+        req.setValue(Self.kimiDeviceID(), forHTTPHeaderField: "X-Msh-Device-Id")
+        guard let (data, code) = Self.syncRequest(req) else {
+            usage.error = "Kimi Code 用量请求失败"
+            return usage
+        }
+        guard code == 200 else {
+            usage.rateLimited = code == 429
+            usage.error = code == 401 || code == 403
+                ? "Kimi Code 凭据无效或过期"
+                : code == 429 ? "Kimi Code 用量接口限流，稍后自动重试"
+                : "Kimi Code 用量接口 HTTP \(code)"
+            return usage
+        }
+        guard let parsed = Self.parseKimiUsage(data) else {
+            usage.error = "Kimi Code 用量响应解析失败"
+            return usage
+        }
+        return parsed
+    }
+
+    static func parseKimiUsage(_ data: Data, now: Date = Date()) -> ProviderUsage? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let weekly = root["usage"] as? [String: Any],
+              let weeklyPct = percent(detail: weekly) else { return nil }
+        var usage = ProviderUsage()
+        usage.weeklyPct = weeklyPct
+        usage.weeklyResetMin = minutesUntil(value: resetValue(weekly), now: now)
+        if let limits = root["limits"] as? [[String: Any]] {
+            let fiveHour = limits.first { limit in
+                guard let window = limit["window"] as? [String: Any],
+                      let duration = number(window["duration"]),
+                      let unit = window["timeUnit"] as? String else { return false }
+                return (unit == "TIME_UNIT_MINUTE" && Int(duration) == 300)
+                    || (unit == "TIME_UNIT_HOUR" && Int(duration) == 5)
+            }
+            if let detail = fiveHour?["detail"] as? [String: Any] {
+                usage.primaryPct = percent(detail: detail)
+                usage.primaryResetMin = minutesUntil(value: resetValue(detail), now: now)
+            }
+        }
+        usage.fetchedAt = now
+        return usage
+    }
+
+    private static func kimiCredential() -> (token: String, isCLI: Bool)? {
+        let path = ("~/.kimi-code/credentials/kimi-code.json" as NSString).expandingTildeInPath
+        if let data = FileManager.default.contents(atPath: path),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let token = obj["access_token"] as? String, !token.isEmpty,
+           !isExpired(obj["expires_at"], grace: 60) {
+            return (token, true)
+        }
+        if let token = ProcessInfo.processInfo.environment["KIMI_CODE_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            return (token, false)
+        }
+        if let token = SecureCredentialStore.load(account: "kimi-code-api-key") {
+            return (token, false)
+        }
+        return nil
+    }
+
+    private static func kimiDeviceID() -> String {
+        let home = ("~/.kimi-code" as NSString).expandingTildeInPath
+        let path = "\(home)/device_id"
+        if let existing = try? String(contentsOfFile: path, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines), !existing.isEmpty {
+            return existing
+        }
+        let id = UUID().uuidString.lowercased()
+        try? FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        try? id.write(toFile: path, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        return id
+    }
+
     // MARK: - helpers
 
     private static func minutesUntil(iso: String?, now: Double) -> Int? {
@@ -234,6 +449,52 @@ final class UsageFetcher {
         return max(0, Int((d.timeIntervalSince1970 - now) / 60))
     }
 
+    private static func number(_ value: Any?) -> Double? {
+        if let n = value as? NSNumber { return n.doubleValue }
+        if let s = value as? String { return Double(s) }
+        return nil
+    }
+
+    private static func percent(detail: [String: Any]) -> Double? {
+        guard let limit = number(detail["limit"]), limit > 0 else { return nil }
+        if let used = number(detail["used"]) {
+            return min(100, max(0, used / limit * 100))
+        }
+        if let remaining = number(detail["remaining"]) {
+            return min(100, max(0, (limit - remaining) / limit * 100))
+        }
+        return nil
+    }
+
+    private static func resetValue(_ detail: [String: Any]) -> Any? {
+        detail["resetTime"] ?? detail["resetAt"] ?? detail["reset_time"] ?? detail["reset_at"]
+    }
+
+    private static func minutesUntil(value: Any?, now: Date) -> Int? {
+        if let epoch = number(value) {
+            let seconds = epoch > 10_000_000_000 ? epoch / 1000 : epoch
+            return max(0, Int((seconds - now.timeIntervalSince1970) / 60))
+        }
+        guard let iso = value as? String else { return nil }
+        return minutesUntil(iso: iso, now: now.timeIntervalSince1970)
+    }
+
+    private static func isExpired(_ value: Any?, grace: TimeInterval = 0) -> Bool {
+        let deadline = Date().addingTimeInterval(grace)
+        if let raw = number(value) {
+            let seconds = raw > 10_000_000_000 ? raw / 1000 : raw
+            return seconds <= deadline.timeIntervalSince1970
+        }
+        guard let iso = value as? String else { return false }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = formatter.date(from: iso) ?? {
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter.date(from: iso)
+        }()
+        return date.map { $0 <= deadline } ?? false
+    }
+
     private static func syncRequest(_ req: URLRequest) -> (Data, Int)? {
         let sem = DispatchSemaphore(value: 0)
         var result: (Data, Int)?
@@ -245,5 +506,14 @@ final class UsageFetcher {
         }.resume()
         sem.wait()
         return result
+    }
+}
+
+private extension String {
+    var asciiHeaderValue: String {
+        let scalars = unicodeScalars.filter { (0x20...0x7e).contains($0.value) }
+        let value = String(String.UnicodeScalarView(scalars))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "unknown" : value
     }
 }

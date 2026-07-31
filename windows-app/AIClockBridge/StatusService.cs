@@ -48,6 +48,8 @@ class StatusSnapshot
 {
     public ClaudeStatus Claude = new();
     public CodexStatus Codex = new();
+    public ProviderUsage Grok = new();
+    public ProviderUsage Kimi = new();
     public long Ts;
     public bool MusicPlaying;
     public string PreferredAgent = "codex";
@@ -91,6 +93,16 @@ class StatusSnapshot
             w.WriteBoolean("fast_mode", Codex.FastMode);
             w.WriteNumber("fast_task_seq", Codex.FastTaskSeq);
             w.WriteEndObject();
+            w.WriteStartObject("grok");
+            WriteNullable(w, "weekly_pct", Grok.WeeklyPct);
+            WriteNullable(w, "weekly_reset_min", Grok.WeeklyResetMin);
+            w.WriteEndObject();
+            w.WriteStartObject("kimi");
+            WriteNullable(w, "five_hour_pct", Kimi.PrimaryPct);
+            WriteNullable(w, "five_hour_reset_min", Kimi.PrimaryResetMin);
+            WriteNullable(w, "weekly_pct", Kimi.WeeklyPct);
+            WriteNullable(w, "weekly_reset_min", Kimi.WeeklyResetMin);
+            w.WriteEndObject();
             w.WriteEndObject();
         }
         return ms.ToArray();
@@ -121,6 +133,8 @@ class StatusSnapshot
         {
             Claude = (ClaudeStatus)Claude.MemberwiseCloneOf(),
             Codex = (CodexStatus)Codex.MemberwiseCloneOf(),
+            Grok = (ProviderUsage)Grok.MemberwiseCloneOf(),
+            Kimi = (ProviderUsage)Kimi.MemberwiseCloneOf(),
             Ts = Ts,
             MusicPlaying = MusicPlaying,
             PreferredAgent = PreferredAgent,
@@ -327,6 +341,8 @@ sealed class StatusService
             snap.Claude.SevenDayPct = cu.WeeklyPct; snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
             var xu = usage.Codex;
             if (xu.WeeklyPct.HasValue) { snap.Codex.WeeklyPct = xu.WeeklyPct; snap.Codex.WeeklyResetMin = xu.WeeklyResetMin; }
+            snap.Grok = usage.Grok;
+            snap.Kimi = usage.Kimi;
         }
         snap.Claude.Status = OverrideStatus(snap.Claude.Status, claudeEvent, now);
         snap.Codex.Status = OverrideStatus(snap.Codex.Status, codexEvent, now);

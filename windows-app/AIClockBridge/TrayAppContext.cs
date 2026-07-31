@@ -19,11 +19,21 @@ sealed class TrayAppContext : ApplicationContext
 
     readonly ToolStripMenuItem _claudeUsageItem = new("Claude …") { Enabled = false };
     readonly ToolStripMenuItem _codexUsageItem = new("Codex …") { Enabled = false };
+    readonly ToolStripMenuItem _grokUsageItem = new("Grok Build …") { Enabled = false };
+    readonly ToolStripMenuItem _kimiUsageItem = new("Kimi Code …") { Enabled = false };
     readonly ToolStripMenuItem _deviceInfoItem = new("设备：未设置") { Enabled = false };
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
     readonly ToolStripMenuItem _marketInstrumentMenu = new("行情标的");
     readonly Dictionary<string, ToolStripMenuItem> _marketInstrumentItems = new();
     readonly Dictionary<int, ToolStripMenuItem> _marketRefreshItems = new();
+    readonly Dictionary<string, ToolStripMenuItem> _petPresetItems = new();
+    readonly Dictionary<int, ToolStripMenuItem> _petScaleItems = new();
+    string _currentPetPreset = "classic";
+    int _currentPetScale = 85;
+    const string ShowGrokKey = "show_grok_usage";
+    const string ShowKimiKey = "show_kimi_usage";
+    const string EnableGrokScreenKey = "enable_grok_screen";
+    const string EnableKimiScreenKey = "enable_kimi_screen";
 
     public TrayAppContext(StatusService service, UsageFetcher usage, NetSpeedMonitor netMonitor,
                           NowPlayingMonitor nowPlaying, MarketMonitor market, int port)
@@ -75,6 +85,53 @@ sealed class TrayAppContext : ApplicationContext
     {
         _menu.Items.Add(_claudeUsageItem);
         _menu.Items.Add(_codexUsageItem);
+        _menu.Items.Add(_grokUsageItem);
+        _menu.Items.Add(_kimiUsageItem);
+
+        var quotaMenu = new ToolStripMenuItem("AI 额度设置");
+        foreach (var (title, key) in new[]
+        {
+            ("显示 Grok Build 额度", ShowGrokKey),
+            ("显示 Kimi Code 额度", ShowKimiKey),
+        })
+        {
+            var item = new ToolStripMenuItem(title) { Checked = Settings.GetBool(key) };
+            item.Click += (_, _) =>
+            {
+                item.Checked = !item.Checked;
+                Settings.SetBool(key, item.Checked);
+                RefreshUsageLines();
+                if (item.Checked) _usage.Refresh();
+            };
+            quotaMenu.DropDownItems.Add(item);
+        }
+        quotaMenu.DropDownItems.Add(new ToolStripSeparator());
+        foreach (var (title, key, mode) in new[]
+        {
+            ("在屏幕菜单显示 Grok", EnableGrokScreenKey, "grok"),
+            ("在屏幕菜单显示 Kimi", EnableKimiScreenKey, "kimi"),
+        })
+        {
+            var item = new ToolStripMenuItem(title)
+            {
+                Checked = Settings.GetBool(key, fallback: false),
+            };
+            item.Click += async (_, _) =>
+            {
+                item.Checked = !item.Checked;
+                Settings.SetBool(key, item.Checked);
+                if (_modeItems.TryGetValue(mode, out var modeItem))
+                    modeItem.Visible = item.Checked;
+                if (!item.Checked && _modeItems.TryGetValue(mode, out modeItem)
+                    && modeItem.Checked)
+                    await SetDisplayMode("auto");
+            };
+            quotaMenu.DropDownItems.Add(item);
+        }
+        quotaMenu.DropDownItems.Add(new ToolStripSeparator());
+        quotaMenu.DropDownItems.Add(MakeItem("设置 Kimi Code API Key…", (_, _) => SetKimiApiKey()));
+        quotaMenu.DropDownItems.Add(MakeItem("清除 Kimi Code API Key", (_, _) => ClearKimiApiKey()));
+        _menu.Items.Add(quotaMenu);
         _menu.Items.Add(new ToolStripSeparator());
 
         _menu.Items.Add(_deviceInfoItem);
@@ -86,10 +143,15 @@ sealed class TrayAppContext : ApplicationContext
         foreach (var (title, mode) in new[]
         {
             ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-            ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"), ("行情", "btc"),
+            ("固定 Codex", "codex"), ("固定 Grok", "grok"), ("固定 Kimi", "kimi"),
+            ("网速曲线", "net"), ("音乐播放", "music"), ("行情", "btc"),
         })
         {
-            var item = new ToolStripMenuItem(title);
+            var item = new ToolStripMenuItem(title)
+            {
+                Visible = mode == "grok" ? Settings.GetBool(EnableGrokScreenKey, fallback: false)
+                    : mode == "kimi" ? Settings.GetBool(EnableKimiScreenKey, fallback: false) : true,
+            };
             item.Click += async (_, _) => await SetDisplayMode(mode);
             _modeItems[mode] = item;
             displayMenu.DropDownItems.Add(item);
@@ -123,6 +185,30 @@ sealed class TrayAppContext : ApplicationContext
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         _menu.Items.Add(MakeItem("更换桌宠动画…（petdex）", (_, _) => OpenPetPicker()));
+
+        var petMenu = new ToolStripMenuItem("桌宠外观");
+        foreach (var (title, preset) in new[]
+        {
+            ("经典宠物", "classic"), ("咖色边牧", "border-collie"),
+        })
+        {
+            var item = new ToolStripMenuItem(title);
+            item.Click += async (_, _) => await SetPetPreset(preset);
+            _petPresetItems[preset] = item;
+            petMenu.DropDownItems.Add(item);
+        }
+        petMenu.DropDownItems.Add(new ToolStripSeparator());
+        foreach (var (title, scale) in new[]
+        {
+            ("小号 70%", 70), ("标准 85%", 85), ("大号 100%", 100),
+        })
+        {
+            var item = new ToolStripMenuItem(title);
+            item.Click += async (_, _) => await SetPetScale(scale);
+            _petScaleItems[scale] = item;
+            petMenu.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(petMenu);
 
         var resetMenu = new ToolStripMenuItem("恢复默认动画");
         foreach (var (title, slot) in new[] { ("Claude 恢复默认", "claude"), ("Codex 恢复默认", "codex") })
@@ -166,6 +252,10 @@ sealed class TrayAppContext : ApplicationContext
             + TodaySuffix(snap.Claude.TokensToday, snap.Claude.CostToday);
         _codexUsageItem.Text = UsageLine("Codex", _usage.Codex, "周", false)
             + TodaySuffix(snap.Codex.TokensToday, snap.Codex.CostToday);
+        _grokUsageItem.Text = UsageLine("Grok Build", _usage.Grok, "周", false);
+        _kimiUsageItem.Text = UsageLine("Kimi Code", _usage.Kimi, "周", true);
+        _grokUsageItem.Visible = Settings.GetBool(ShowGrokKey);
+        _kimiUsageItem.Visible = Settings.GetBool(ShowKimiKey);
     }
 
     static string UsageLine(string name, ProviderUsage u, string weeklyLabel, bool showPrimary)
@@ -234,10 +324,19 @@ sealed class TrayAppContext : ApplicationContext
         var showing = info.Mode == "net" ? "网速"
             : info.Mode == "music" ? "音乐"
             : info.Mode == "btc" ? "行情"
-            : (info.Showing == "claude" ? "Claude" : "Codex");
+            : info.Showing == "claude" ? "Claude"
+            : info.Showing == "codex" ? "Codex"
+            : info.Showing == "grok" ? "Grok"
+            : info.Showing == "kimi" ? "Kimi" : "未知";
         _deviceInfoItem.Text =
             $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
         foreach (var (mode, item) in _modeItems) item.Checked = mode == info.Mode;
+        foreach (var item in _petPresetItems.Values) item.Checked = false;
+        if (_petPresetItems.TryGetValue(info.PetPreset, out var presetItem)) presetItem.Checked = true;
+        foreach (var item in _petScaleItems.Values) item.Checked = false;
+        if (_petScaleItems.TryGetValue(info.PetScale, out var scaleItem)) scaleItem.Checked = true;
+        _currentPetPreset = info.PetPreset;
+        _currentPetScale = info.PetScale;
     }
 
     // MARK: - pairing
@@ -285,6 +384,31 @@ sealed class TrayAppContext : ApplicationContext
         Process.Start(new ProcessStartInfo(url.ToString()) { UseShellExecute = true });
     }
 
+    void SetKimiApiKey()
+    {
+        var input = InputDialog.Show(
+            "Kimi Code API Key",
+            "优先自动使用有效的 Kimi Code CLI 登录；这里的 Key 仅作后备，并保存到 Windows 凭据管理器。",
+            "", "粘贴 Kimi Code API Key", secure: true);
+        if (input == null) return;
+        if (SecureCredentialStore.SaveKimiApiKey(input))
+        {
+            Toast("已保存", "Kimi Code API Key 已安全保存到 Windows 凭据管理器。");
+            _usage.Refresh();
+        }
+        else Toast("保存失败", "无法写入 Windows 凭据管理器。");
+    }
+
+    void ClearKimiApiKey()
+    {
+        if (SecureCredentialStore.SaveKimiApiKey(null))
+        {
+            Toast("已清除", "桥接 App 仍会优先自动读取 Kimi Code CLI 登录。");
+            _usage.Refresh();
+        }
+        else Toast("清除失败", "无法更新 Windows 凭据管理器。");
+    }
+
     async Task SetDisplayMode(string mode)
     {
         try
@@ -295,6 +419,32 @@ sealed class TrayAppContext : ApplicationContext
         catch (Exception e)
         {
             Toast("切换失败", e.Message);
+        }
+    }
+
+    async Task SetPetPreset(string preset)
+    {
+        try
+        {
+            await DeviceClient.SetPetAppearance(preset, _currentPetScale);
+            await RefreshDeviceSection();
+        }
+        catch (Exception e)
+        {
+            Toast("设置失败", e.Message);
+        }
+    }
+
+    async Task SetPetScale(int scale)
+    {
+        try
+        {
+            await DeviceClient.SetPetAppearance(_currentPetPreset, scale);
+            await RefreshDeviceSection();
+        }
+        catch (Exception e)
+        {
+            Toast("设置失败", e.Message);
         }
     }
 
@@ -400,7 +550,8 @@ sealed class TrayAppContext : ApplicationContext
 // Small modal prompt, the NSAlert-with-text-field equivalent.
 static class InputDialog
 {
-    public static string Show(string title, string message, string value, string placeholder)
+    public static string Show(string title, string message, string value, string placeholder,
+                              bool secure = false)
     {
         using var form = new Form
         {
@@ -416,7 +567,12 @@ static class InputDialog
         };
         var label = new Label { Text = message };
         label.SetBounds(14, 12, 352, 40);
-        var textBox = new TextBox { Text = value, PlaceholderText = placeholder };
+        var textBox = new TextBox
+        {
+            Text = value,
+            PlaceholderText = placeholder,
+            UseSystemPasswordChar = secure,
+        };
         textBox.SetBounds(14, 58, 352, 24);
         var ok = new Button { Text = "保存", DialogResult = DialogResult.OK };
         ok.SetBounds(196, 96, 80, 28);

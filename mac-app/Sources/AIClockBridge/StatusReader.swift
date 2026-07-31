@@ -41,6 +41,8 @@ struct Snapshot {
     var claude: ClaudeStatus
     var codex: CodexStatus
     var ts: Int
+    var grok = ProviderUsage()
+    var kimi = ProviderUsage()
     var musicPlaying: Bool = false
     var preferredAgent: String = "codex"
 }
@@ -272,6 +274,8 @@ final class StatusService {
                 snap.codex.weeklyPct = pct
                 snap.codex.weeklyResetMin = codexUsage.weeklyResetMin
             }
+            snap.grok = u.grok
+            snap.kimi = u.kimi
         }
         snap.claude.status = overrideStatus(snap.claude.status, with: currentClaudeEvent, now: now)
         snap.codex.status = overrideStatus(snap.codex.status, with: currentCodexEvent, now: now)
@@ -624,6 +628,16 @@ extension Snapshot {
                 "last_activity_at": codex.lastActivityAt,
                 "fast_mode": codex.fastMode,
                 "fast_task_seq": codex.fastTaskSeq,
+            ],
+            "grok": [
+                "weekly_pct": num(grok.weeklyPct),
+                "weekly_reset_min": num(grok.weeklyResetMin),
+            ],
+            "kimi": [
+                "five_hour_pct": num(kimi.primaryPct),
+                "five_hour_reset_min": num(kimi.primaryResetMin),
+                "weekly_pct": num(kimi.weeklyPct),
+                "weekly_reset_min": num(kimi.weeklyResetMin),
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: dict)) ?? Data("{}".utf8)
