@@ -19,6 +19,7 @@ class ClaudeStatus
     public int? FiveHourResetMin;
     public double? SevenDayPct;
     public int? SevenDayResetMin;
+    public double? FablePct;
     public bool NeedsInput; // waiting on a permission/approval prompt
     public double? CostToday;
     public bool CostComplete = true;
@@ -73,6 +74,7 @@ class StatusSnapshot
             WriteNullable(w, "five_hour_reset_min", Claude.FiveHourResetMin);
             WriteNullable(w, "seven_day_pct", Claude.SevenDayPct);
             WriteNullable(w, "seven_day_reset_min", Claude.SevenDayResetMin);
+            WriteNullable(w, "fable_pct", Claude.FablePct);
             w.WriteBoolean("needs_input", Claude.NeedsInput);
             WriteNullable(w, "cost_today_usd", Claude.CostToday);
             w.WriteBoolean("cost_complete", Claude.CostComplete);
@@ -339,6 +341,7 @@ sealed class StatusService
             var cu = usage.Claude;
             snap.Claude.FiveHourPct = cu.PrimaryPct; snap.Claude.FiveHourResetMin = cu.PrimaryResetMin;
             snap.Claude.SevenDayPct = cu.WeeklyPct; snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
+            snap.Claude.FablePct = cu.FablePct;
             var xu = usage.Codex;
             if (xu.WeeklyPct.HasValue) { snap.Codex.WeeklyPct = xu.WeeklyPct; snap.Codex.WeeklyResetMin = xu.WeeklyResetMin; }
             snap.Grok = usage.Grok;

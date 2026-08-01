@@ -24,9 +24,10 @@ sealed class MirrorControl : Control
     public double RingPct;
     public bool NeedsInput; // shown app waiting on approval -> red border flash
     public bool FlashOn;
-    public string Line1 = "5h -";
-    public string Line2 = "Weekly -";
-    public string DailyLine = "TODAY 0  ~$0.00";
+    public string Line1 = "-";
+    public string Line2 = "-";
+    public string Line3 = "-";
+    public string DailyLine = "TODAY 0  $0.00";
     public int RingLevel; // 0 green, 1 yellow, 2 red
     public string ShowingProvider = "claude";
     public bool DeviceOK;
@@ -180,8 +181,24 @@ sealed class MirrorControl : Control
         using (var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel))
         using (var fmt = new StringFormat { Alignment = StringAlignment.Center })
         {
-            g.DrawString(Line1, font, Brushes.White, new RectangleF(0, 188, 240, 18), fmt);
-            g.DrawString(Line2, font, Brushes.White, new RectangleF(0, 206, 240, 18), fmt);
+            if (ShowingProvider == "claude")
+            {
+                using var labelFont = new Font("Consolas", 11, FontStyle.Bold, GraphicsUnit.Pixel);
+                using var labelBrush = new SolidBrush(Color.FromArgb(173, 173, 173));
+                var labels = new[] { "5H", "Weekly", "Fable" };
+                var values = new[] { Line1, Line2, Line3 };
+                for (var index = 0; index < 3; index++)
+                {
+                    var x = index * 80;
+                    g.DrawString(labels[index], labelFont, labelBrush, new RectangleF(x, 184, 80, 16), fmt);
+                    g.DrawString(values[index], font, Brushes.White, new RectangleF(x, 201, 80, 22), fmt);
+                }
+            }
+            else
+            {
+                g.DrawString(Line1, font, Brushes.White, new RectangleF(0, 188, 240, 18), fmt);
+                g.DrawString(Line2, font, Brushes.White, new RectangleF(0, 206, 240, 18), fmt);
+            }
         }
         using (var dailyFont = new Font("Consolas", 16, FontStyle.Regular, GraphicsUnit.Pixel))
         using (var dailyFmt = new StringFormat { Alignment = StringAlignment.Center })
@@ -670,8 +687,9 @@ sealed class MirrorForm : Form
                     ? 100.0 * snap.Claude.SessionMin / snap.Claude.SessionWindowMin : 0);
             _mirror.RingPct = pct;
             _mirror.RingLevel = 0;
-            _mirror.Line1 = "5h " + PctText(pct);
-            _mirror.Line2 = "Weekly " + PctText(snap.Claude.SevenDayPct);
+            _mirror.Line1 = PctText(pct);
+            _mirror.Line2 = PctText(snap.Claude.SevenDayPct);
+            _mirror.Line3 = PctText(snap.Claude.FablePct);
             _mirror.NeedsInput = snap.Claude.NeedsInput;
             _mirror.DailyLine = DailyLine(snap.Claude.TokensToday, snap.Claude.CostToday);
         }
@@ -681,6 +699,7 @@ sealed class MirrorForm : Form
             _mirror.RingLevel = snap.Codex.WeeklyPct >= 75 ? 2 : snap.Codex.WeeklyPct >= 50 ? 1 : 0;
             _mirror.Line1 = "Weekly";
             _mirror.Line2 = PctText(snap.Codex.WeeklyPct);
+            _mirror.Line3 = "";
             _mirror.NeedsInput = snap.Codex.NeedsInput;
             _mirror.DailyLine = DailyLine(snap.Codex.TokensToday, snap.Codex.CostToday);
         }
@@ -690,6 +709,7 @@ sealed class MirrorForm : Form
             _mirror.RingLevel = RingLevel(snap.Grok.WeeklyPct);
             _mirror.Line1 = "Weekly";
             _mirror.Line2 = PctText(snap.Grok.WeeklyPct);
+            _mirror.Line3 = "";
             _mirror.NeedsInput = false;
             _mirror.DailyLine = "";
         }
@@ -699,6 +719,7 @@ sealed class MirrorForm : Form
             _mirror.RingLevel = RingLevel(snap.Kimi.WeeklyPct);
             _mirror.Line1 = "5h " + PctText(snap.Kimi.PrimaryPct);
             _mirror.Line2 = "Weekly " + PctText(snap.Kimi.WeeklyPct);
+            _mirror.Line3 = "";
             _mirror.NeedsInput = false;
             _mirror.DailyLine = "";
         }
@@ -714,7 +735,7 @@ sealed class MirrorForm : Form
     {
         var text = tokens >= 1_000_000 ? $"{tokens / 1_000_000.0:F1}M"
             : tokens >= 1_000 ? $"{tokens / 1_000.0:F1}K" : tokens.ToString();
-        return $"TODAY {text}  ~{(cost.HasValue ? $"${cost.Value:F2}" : "$?")}";
+        return $"TODAY {text}  {(cost.HasValue ? $"${cost.Value:F2}" : "$?")}";
     }
 
     void EnsureSprite(DeviceInfo info)

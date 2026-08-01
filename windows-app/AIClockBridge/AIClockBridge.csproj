@@ -16,6 +16,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>AIClockBridge</AssemblyName>
     <RootNamespace>AIClockBridge</RootNamespace>
+    <Version>0.4.6.15</Version>
+    <AssemblyVersion>0.4.6.15</AssemblyVersion>
+    <FileVersion>0.4.6.15</FileVersion>
+    <InformationalVersion>0.4.6-c3.15</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
 

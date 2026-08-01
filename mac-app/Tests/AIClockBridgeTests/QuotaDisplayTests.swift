@@ -46,6 +46,43 @@ final class QuotaDisplayTests: XCTestCase {
         XCTAssertEqual((kimi["weekly_pct"] as? NSNumber)?.doubleValue, 41)
     }
 
+    func testClaudeFableScopedWeeklyPayloadAndStatusJSON() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "five_hour": ["utilization": 11.0, "resets_at": "2026-08-01T05:00:00Z"],
+            "seven_day": ["utilization": 9.0, "resets_at": "2026-08-07T00:00:00Z"],
+            "limits": [[
+                "kind": "weekly_scoped", "group": "weekly", "percent": 5.0,
+                "resets_at": "2026-08-07T00:00:00Z",
+                "scope": ["model": ["display_name": "Fable"]],
+            ]],
+        ])
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-01T00:00:00Z"))
+        let usage = try XCTUnwrap(UsageFetcher.parseClaudeUsage(data, now: now))
+        XCTAssertEqual(usage.primaryPct, 11)
+        XCTAssertEqual(usage.weeklyPct, 9)
+        XCTAssertEqual(usage.fablePct, 5)
+        XCTAssertEqual(usage.fableResetMin, 6 * 24 * 60)
+
+        var claude = ClaudeStatus()
+        claude.fablePct = usage.fablePct
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Snapshot(claude: claude, codex: CodexStatus(), ts: 1).jsonData()
+        ) as? [String: Any])
+        let encoded = try XCTUnwrap(root["claude"] as? [String: Any])
+        XCTAssertEqual((encoded["fable_pct"] as? NSNumber)?.doubleValue, 5)
+        XCTAssertNil(encoded["fable_reset_min"])
+    }
+
+    func testClaudeIgnoresUnrelatedScopedWeeklyLimit() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "limits": [[
+                "kind": "weekly_scoped", "percent": 33.0,
+                "scope": ["model": ["display_name": "Sonnet"]],
+            ]],
+        ])
+        XCTAssertNil(UsageFetcher.parseClaudeUsage(data)?.fablePct)
+    }
+
     func testCodexWeeklyWindowAcceptsCurrentPrimaryShape() {
         let limits: [String: Any] = [
             "primary": [

@@ -4,7 +4,7 @@ import Foundation
 // by reusing the OAuth tokens the CLIs already store locally, no extra login:
 //   Claude: token from macOS Keychain item "Claude Code-credentials" (or
 //           ~/.claude/.credentials.json), then GET
-//           https://api.anthropic.com/api/oauth/usage  (5h + 7d windows)
+//           https://api.anthropic.com/api/oauth/usage  (5H + Weekly + Fable)
 //   Codex:  token from ~/.codex/auth.json, then GET
 //           https://chatgpt.com/backend-api/wham/usage (weekly window only)
 //   Grok:   token from ~/.grok/auth.json (fallback: Pi xAI auth), then GET
@@ -18,6 +18,8 @@ struct ProviderUsage {
     var primaryResetMin: Int?   // minutes until it resets
     var weeklyPct: Double?      // 7d / weekly window used %
     var weeklyResetMin: Int?
+    var fablePct: Double?       // Claude model-scoped weekly Fable window
+    var fableResetMin: Int?
     var error: String?
     var fetchedAt: Date?
     var rateLimited = false
@@ -116,7 +118,8 @@ final class UsageFetcher {
     }
 
     private static func merge(old: ProviderUsage, new: ProviderUsage) -> ProviderUsage {
-        if new.primaryPct == nil && new.weeklyPct == nil && (old.primaryPct != nil || old.weeklyPct != nil) {
+        if new.primaryPct == nil && new.weeklyPct == nil && new.fablePct == nil
+            && (old.primaryPct != nil || old.weeklyPct != nil || old.fablePct != nil) {
             var kept = old
             kept.error = new.error
             return kept
@@ -150,18 +153,38 @@ final class UsageFetcher {
                 : "Claude 用量接口 HTTP \(code)"
             return usage
         }
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let parsed = Self.parseClaudeUsage(data) else {
             usage.error = "Claude 用量响应解析失败"
             return usage
         }
-        let now = Date().timeIntervalSince1970
+        return parsed
+    }
+
+    static func parseClaudeUsage(_ data: Data, now: Date = Date()) -> ProviderUsage? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        var usage = ProviderUsage()
+        let timestamp = now.timeIntervalSince1970
         if let w = obj["five_hour"] as? [String: Any] {
             usage.primaryPct = (w["utilization"] as? NSNumber)?.doubleValue
-            usage.primaryResetMin = Self.minutesUntil(iso: w["resets_at"] as? String, now: now)
+            usage.primaryResetMin = Self.minutesUntil(iso: w["resets_at"] as? String, now: timestamp)
         }
         if let w = obj["seven_day"] as? [String: Any] {
             usage.weeklyPct = (w["utilization"] as? NSNumber)?.doubleValue
-            usage.weeklyResetMin = Self.minutesUntil(iso: w["resets_at"] as? String, now: now)
+            usage.weeklyResetMin = Self.minutesUntil(iso: w["resets_at"] as? String, now: timestamp)
+        }
+        if let limits = obj["limits"] as? [[String: Any]] {
+            for limit in limits where (limit["kind"] as? String ?? "").lowercased() == "weekly_scoped" {
+                let scope = limit["scope"] as? [String: Any]
+                let model = scope?["model"] as? [String: Any]
+                let name = (model?["display_name"] as? String ?? "").lowercased()
+                guard name.contains("fable") else { continue }
+                usage.fablePct = Self.number(limit["percent"])
+                usage.fableResetMin = Self.minutesUntil(iso: limit["resets_at"] as? String,
+                                                         now: timestamp)
+                break
+            }
         }
         usage.fetchedAt = Date()
         return usage

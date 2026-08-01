@@ -7,7 +7,7 @@ namespace AIClockBridge;
 // CLIs already store locally, no extra login. On Windows both live in files
 // (no Keychain):
 //   Claude: %USERPROFILE%\.claude\.credentials.json, then GET
-//           https://api.anthropic.com/api/oauth/usage  (5h + 7d windows)
+//           https://api.anthropic.com/api/oauth/usage  (5H + Weekly + Fable)
 //   Codex:  %USERPROFILE%\.codex\auth.json, then GET
 //           https://chatgpt.com/backend-api/wham/usage (the app shows weekly only)
 //   Grok:   %USERPROFILE%\.grok\auth.json (fallback: Pi xAI auth)
@@ -20,6 +20,8 @@ class ProviderUsage
     public int? PrimaryResetMin;   // minutes until it resets
     public double? WeeklyPct;      // 7d / weekly window used %
     public int? WeeklyResetMin;
+    public double? FablePct;       // Claude model-scoped weekly Fable window
+    public int? FableResetMin;
     public string Error;
     public DateTime? FetchedAt;
     public bool RateLimited;
@@ -103,8 +105,8 @@ sealed class UsageFetcher
 
     static ProviderUsage Merge(ProviderUsage old, ProviderUsage fresh)
     {
-        if (fresh.PrimaryPct == null && fresh.WeeklyPct == null
-            && (old.PrimaryPct != null || old.WeeklyPct != null))
+        if (fresh.PrimaryPct == null && fresh.WeeklyPct == null && fresh.FablePct == null
+            && (old.PrimaryPct != null || old.WeeklyPct != null || old.FablePct != null))
         {
             return new ProviderUsage
             {
@@ -112,6 +114,8 @@ sealed class UsageFetcher
                 PrimaryResetMin = old.PrimaryResetMin,
                 WeeklyPct = old.WeeklyPct,
                 WeeklyResetMin = old.WeeklyResetMin,
+                FablePct = old.FablePct,
+                FableResetMin = old.FableResetMin,
                 FetchedAt = old.FetchedAt,
                 Error = fresh.Error,
             };
@@ -161,24 +165,48 @@ sealed class UsageFetcher
         }
         try
         {
-            using var doc = JsonDocument.Parse(body);
-            var now = DateTimeOffset.UtcNow;
-            if (doc.RootElement.TryGetProperty("five_hour", out var fiveHour))
-            {
-                usage.PrimaryPct = NumberOrNull(fiveHour, "utilization");
-                usage.PrimaryResetMin = MinutesUntil(StringOrNull(fiveHour, "resets_at"), now);
-            }
-            if (doc.RootElement.TryGetProperty("seven_day", out var sevenDay))
-            {
-                usage.WeeklyPct = NumberOrNull(sevenDay, "utilization");
-                usage.WeeklyResetMin = MinutesUntil(StringOrNull(sevenDay, "resets_at"), now);
-            }
-            usage.FetchedAt = DateTime.UtcNow;
+            return ParseClaudeUsage(body, DateTimeOffset.UtcNow);
         }
         catch
         {
             usage.Error = "Claude 用量响应解析失败";
         }
+        return usage;
+    }
+
+    internal static ProviderUsage ParseClaudeUsage(string body, DateTimeOffset now)
+    {
+        using var doc = JsonDocument.Parse(body);
+        var usage = new ProviderUsage();
+        if (doc.RootElement.TryGetProperty("five_hour", out var fiveHour))
+        {
+            usage.PrimaryPct = NumberOrNull(fiveHour, "utilization");
+            usage.PrimaryResetMin = MinutesUntil(StringOrNull(fiveHour, "resets_at"), now);
+        }
+        if (doc.RootElement.TryGetProperty("seven_day", out var sevenDay))
+        {
+            usage.WeeklyPct = NumberOrNull(sevenDay, "utilization");
+            usage.WeeklyResetMin = MinutesUntil(StringOrNull(sevenDay, "resets_at"), now);
+        }
+        if (doc.RootElement.TryGetProperty("limits", out var limits)
+            && limits.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var limit in limits.EnumerateArray())
+            {
+                if (!string.Equals(StringOrNull(limit, "kind"), "weekly_scoped",
+                                   StringComparison.OrdinalIgnoreCase)
+                    || !limit.TryGetProperty("scope", out var scope)
+                    || scope.ValueKind != JsonValueKind.Object
+                    || !scope.TryGetProperty("model", out var model)
+                    || model.ValueKind != JsonValueKind.Object
+                    || !(StringOrNull(model, "display_name") ?? "")
+                        .Contains("fable", StringComparison.OrdinalIgnoreCase)) continue;
+                usage.FablePct = NumberOrNull(limit, "percent");
+                usage.FableResetMin = MinutesUntil(StringOrNull(limit, "resets_at"), now);
+                break;
+            }
+        }
+        usage.FetchedAt = DateTime.UtcNow;
         return usage;
     }
 

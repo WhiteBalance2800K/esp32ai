@@ -207,6 +207,7 @@ struct ClaudeStatus {
   int fiveHourResetMin = -1; // minutes until the 5h window resets
   float sevenDayPct = -1;
   int sevenDayResetMin = -1; // minutes until the 7-day window resets
+  float fablePct = -1;
   bool needsInput = false; // waiting on a permission/approval prompt
   float costToday = -1;
   uint64_t lastActivityAt = 0;
@@ -618,7 +619,8 @@ String pctText(float pct) {
 // changes (force = after a full-screen clear), so the 5s poll never flashes.
 const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
 const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
-String lastQuota5h, lastQuotaWk;
+const int CLAUDE_QUOTA_COL1_X = 45, CLAUDE_QUOTA_COL2_X = 120, CLAUDE_QUOTA_COL3_X = 195;
+String lastQuota5h, lastQuotaWk, lastQuotaFable;
 String lastDailyUsage;
 
 // Faux-bold: the packed TFT_eSPI fonts have no bold face, so draw twice with
@@ -648,6 +650,31 @@ void drawQuotaText(float hourPct, float weekPct, bool force) {
   }
 }
 
+void drawClaudeQuotaText(float hourPct, float weekPct, float fablePct, bool force) {
+  tft.setTextDatum(TC_DATUM);
+  if (force) {
+    drawBoldString("5H", CLAUDE_QUOTA_COL1_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+    drawBoldString("Weekly", CLAUDE_QUOTA_COL2_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+    drawBoldString("Fable", CLAUDE_QUOTA_COL3_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+  }
+  String v1 = pctText(hourPct), v2 = pctText(weekPct), v3 = pctText(fablePct);
+  if (force || v1 != lastQuota5h) {
+    lastQuota5h = v1;
+    tft.fillRect(CLAUDE_QUOTA_COL1_X - 34, QUOTA_VALUE_Y, 68, 26, TFT_BLACK);
+    drawBoldString(v1, CLAUDE_QUOTA_COL1_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  }
+  if (force || v2 != lastQuotaWk) {
+    lastQuotaWk = v2;
+    tft.fillRect(CLAUDE_QUOTA_COL2_X - 34, QUOTA_VALUE_Y, 68, 26, TFT_BLACK);
+    drawBoldString(v2, CLAUDE_QUOTA_COL2_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  }
+  if (force || v3 != lastQuotaFable) {
+    lastQuotaFable = v3;
+    tft.fillRect(CLAUDE_QUOTA_COL3_X - 34, QUOTA_VALUE_Y, 68, 26, TFT_BLACK);
+    drawBoldString(v3, CLAUDE_QUOTA_COL3_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  }
+}
+
 // Codex intentionally shows only the weekly limit. Its 5h window is neither
 // parsed by the bridge nor rendered here.
 void drawCodexQuotaText(float weekPct, bool force) {
@@ -662,7 +689,7 @@ void drawCodexQuotaText(float weekPct, bool force) {
 }
 
 void drawDailyUsage(long tokens, float cost, bool force) {
-  String line = "TODAY " + formatTokens(tokens) + "  ~" + (cost >= 0 ? "$" + String(cost, 2) : "$?");
+  String line = "TODAY " + formatTokens(tokens) + "  " + (cost >= 0 ? "$" + String(cost, 2) : "$?");
   if (!force && line == lastDailyUsage) return;
   lastDailyUsage = line;
   tft.fillRect(0, 163, SCREEN_W, 22, TFT_BLACK);
@@ -820,7 +847,7 @@ void drawActiveApp() {
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
     if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame);
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, true);
+    drawClaudeQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, claudeStatus.fablePct, true);
     drawDailyUsage(claudeStatus.tokensToday, claudeStatus.costToday, true);
   } else if (currentApp == APP_CODEX) {
     drawSquareRing(max(codexStatus.weeklyPct, 0.0f), currentStatusColor());
@@ -849,7 +876,7 @@ void refreshActiveApp() {
   }
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
+    drawClaudeQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, claudeStatus.fablePct, false);
     drawDailyUsage(claudeStatus.tokensToday, claudeStatus.costToday, false);
   } else if (currentApp == APP_CODEX) {
     drawSquareRing(max(codexStatus.weeklyPct, 0.0f), currentStatusColor());
@@ -1837,6 +1864,7 @@ bool parseStatusJson(const String &payload) {
     claudeStatus.fiveHourResetMin = c["five_hour_reset_min"] | -1;
     claudeStatus.sevenDayPct = c["seven_day_pct"] | -1.0;
     claudeStatus.sevenDayResetMin = c["seven_day_reset_min"] | -1;
+    claudeStatus.fablePct = c["fable_pct"] | -1.0;
     claudeStatus.needsInput = c["needs_input"] | false;
     claudeStatus.costToday = c["cost_today_usd"].is<float>() ? c["cost_today_usd"].as<float>() : -1;
     claudeStatus.lastActivityAt = c["last_activity_at"] | (uint64_t)0;

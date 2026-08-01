@@ -86,9 +86,10 @@ final class MirrorView: NSView {
     var ringLevel: QuotaBorderLevel = .green
     var needsInput = false // shown app waiting on approval -> red border flash
     var flashOn = false
-    var line1 = "5h -"
-    var line2 = "Weekly -"
-    var dailyLine = "TODAY 0  ~$0.00"
+    var line1 = "-"
+    var line2 = "-"
+    var line3 = "-"
+    var dailyLine = "TODAY 0  $0.00"
     var showingProvider = "claude"
     var deviceOK = false
     // net-mode mirror: same scrolling area-chart model as the firmware —
@@ -240,8 +241,24 @@ final class MirrorView: NSView {
             .foregroundColor: NSColor.white,
             .paragraphStyle: style,
         ]
-        (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 18), withAttributes: attrs)
-        (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 240, height: 18), withAttributes: attrs)
+        if showingProvider == "claude" {
+            let labels = ["5H", "Weekly", "Fable"]
+            let values = [line1, line2, line3]
+            let labelAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor(white: 0.68, alpha: 1), .paragraphStyle: style,
+            ]
+            for index in 0..<3 {
+                let x = CGFloat(index * 80)
+                (labels[index] as NSString).draw(in: NSRect(x: x, y: 184, width: 80, height: 16),
+                                                  withAttributes: labelAttrs)
+                (values[index] as NSString).draw(in: NSRect(x: x, y: 201, width: 80, height: 22),
+                                                  withAttributes: attrs)
+            }
+        } else {
+            (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 18), withAttributes: attrs)
+            (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 240, height: 18), withAttributes: attrs)
+        }
         (dailyLine as NSString).draw(in: NSRect(x: 0, y: 164, width: 240, height: 20), withAttributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 16, weight: .medium),
             .foregroundColor: NSColor(white: 0.68, alpha: 1), .paragraphStyle: style,
@@ -695,8 +712,9 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                     ? 100.0 * Double(snap.claude.sessionMin) / Double(snap.claude.sessionWindowMin) : 0)
             mirror.ringPct = pct
             mirror.ringLevel = .green
-            mirror.line1 = "5h " + Self.pctText(pct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.claude.sevenDayPct)
+            mirror.line1 = Self.pctText(pct)
+            mirror.line2 = Self.pctText(snap.claude.sevenDayPct)
+            mirror.line3 = Self.pctText(snap.claude.fablePct)
             mirror.needsInput = snap.claude.needsInput
             mirror.dailyLine = Self.dailyLine(tokens: snap.claude.tokensToday, cost: snap.claude.costToday)
         } else if info.showing == "codex" {
@@ -704,6 +722,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.ringLevel = codexWeeklyBorderLevel(snap.codex.weeklyPct)
             mirror.line1 = "Weekly"
             mirror.line2 = Self.pctText(snap.codex.weeklyPct)
+            mirror.line3 = ""
             mirror.needsInput = snap.codex.needsInput
             mirror.dailyLine = Self.dailyLine(tokens: snap.codex.tokensToday, cost: snap.codex.costToday)
         } else if info.showing == "grok" {
@@ -711,6 +730,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.ringLevel = codexWeeklyBorderLevel(snap.grok.weeklyPct)
             mirror.line1 = "Weekly"
             mirror.line2 = Self.pctText(snap.grok.weeklyPct)
+            mirror.line3 = ""
             mirror.needsInput = false
             mirror.dailyLine = ""
         } else {
@@ -718,6 +738,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.ringLevel = codexWeeklyBorderLevel(snap.kimi.weeklyPct)
             mirror.line1 = "5h " + Self.pctText(snap.kimi.primaryPct)
             mirror.line2 = "Weekly " + Self.pctText(snap.kimi.weeklyPct)
+            mirror.line3 = ""
             mirror.needsInput = false
             mirror.dailyLine = ""
         }
@@ -734,7 +755,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         if tokens >= 1_000_000 { tokenText = String(format: "%.1fM", Double(tokens) / 1_000_000) }
         else if tokens >= 1_000 { tokenText = String(format: "%.1fK", Double(tokens) / 1_000) }
         else { tokenText = String(tokens) }
-        return "TODAY \(tokenText)  ~\(cost.map { String(format: "$%.2f", $0) } ?? "$?")"
+        return "TODAY \(tokenText)  \(cost.map { String(format: "$%.2f", $0) } ?? "$?")"
     }
 
     private func ensureSprite(_ info: DeviceInfo) {

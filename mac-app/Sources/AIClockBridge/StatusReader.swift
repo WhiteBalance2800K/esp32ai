@@ -15,6 +15,7 @@ struct ClaudeStatus {
     var fiveHourResetMin: Int? = nil
     var sevenDayPct: Double? = nil
     var sevenDayResetMin: Int? = nil
+    var fablePct: Double? = nil
     var needsInput: Bool = false // waiting on a permission/approval prompt
     var costToday: Double? = 0
     var costComplete: Bool = true
@@ -98,7 +99,7 @@ final class StatusService {
     private let claudeDir = ("~/.claude/projects" as NSString).expandingTildeInPath
     private let codexDir = ("~/.codex/sessions" as NSString).expandingTildeInPath
 
-    /// Real OAuth quota merged into snapshots when set: Claude 5h/weekly and
+    /// Real OAuth quota merged into snapshots when set: Claude 5H/Weekly/Fable and
     /// Codex weekly only. Log-derived values remain the offline fallback.
     var usage: UsageFetcher?
 
@@ -269,6 +270,7 @@ final class StatusService {
             snap.claude.fiveHourResetMin = claudeUsage.primaryResetMin
             snap.claude.sevenDayPct = claudeUsage.weeklyPct
             snap.claude.sevenDayResetMin = claudeUsage.weeklyResetMin
+            snap.claude.fablePct = claudeUsage.fablePct
             let codexUsage = u.codex
             if let pct = codexUsage.weeklyPct {
                 snap.codex.weeklyPct = pct
@@ -609,6 +611,7 @@ extension Snapshot {
                 "five_hour_reset_min": num(claude.fiveHourResetMin),
                 "seven_day_pct": num(claude.sevenDayPct),
                 "seven_day_reset_min": num(claude.sevenDayResetMin),
+                "fable_pct": num(claude.fablePct),
                 "needs_input": claude.needsInput,
                 "cost_today_usd": num(claude.costToday),
                 "cost_complete": claude.costComplete,

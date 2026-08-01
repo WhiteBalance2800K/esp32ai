@@ -8,7 +8,7 @@
 - **工作状态**（working/idle/offline）：本地会话日志的新旧程度
   - `~/.claude/projects/**/*.jsonl`（Claude Code 会话记录）
   - `~/.codex/sessions/**/*.jsonl`（Codex CLI 会话记录）
-- **真实额度**（Claude 5h / 周窗口，Codex 仅周窗口）：复用两个 CLI 已经存在本机的
+- **真实额度**（Claude 5H / Weekly / Fable，Codex 仅 Weekly）：复用两个 CLI 已经存在本机的
   OAuth 登录凭据，直接调各自官方用量接口（做法与
   [CodexBar](https://github.com/steipete/CodexBar) 相同，token 只发给各自官方 API）：
   - Claude：Keychain 里的 `Claude Code-credentials` → `api.anthropic.com/api/oauth/usage`
@@ -53,7 +53,7 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   `GET /sprite/<app>/raw` 拉取（设备正在用什么就播什么，自定义/内置都一样），
   working 时同步播放走路循环，随设备 2s/6s 切换同步换角色；底部附
   自动/Claude/Codex 快速切换。
-- **右键点击** → 控制菜单：Claude 5h/周、Codex Weekly、Grok Build Weekly、
+- **右键点击** → 控制菜单：Claude 5H/Weekly/Fable、Codex Weekly、Grok Build Weekly、
   Kimi Code 5h/周用量与重置倒计时 + 设备遥控：
 
 - **自动查找并配对设备**：一般不用手动——设备本来就在轮询本机的 `/status`，
@@ -63,7 +63,8 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
 - **设置设备地址…**：手动填时钟的 IP（开机时屏幕会显示；有自动配对后基本用不上）
 - **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 行情；其内的
   “AI 额度设置”可启用默认隐藏的 Grok、Kimi 固定显示项
-- **行情刷新间隔**：10/30/60/120 秒；同时控制桥接端报价拉取和收藏标的轮换
+- **行情设置**：统一收纳 K线周期、10/30/60/120 秒刷新间隔、行情标的和搜索/添加；
+  刷新间隔同时控制桥接端报价拉取和收藏标的轮换
 - **行情标的**：上证、恒生、SPX、NDX、KOSPI 等预设，或输入 sh/sz/bj/hk/us/kr 代码
 - **音乐播放**：显示 Mac 当前播放的专辑封面、歌曲、歌手和进度
 - **桌宠外观**：依次切换经典宠物 / 照片定制咖色边牧 / 自定义；“自定义…”会打开
@@ -82,7 +83,8 @@ curl -s http://localhost:8765/status | python3 -m json.tool
 
 ```json
 {
-  "claude": {"status": "working", "tokens_today": 4868001, "session_min": 26, "session_window_min": 300},
+  "claude": {"status": "working", "tokens_today": 4868001,
+             "five_hour_pct": 11.0, "seven_day_pct": 9.0, "fable_pct": 5.0},
   "codex":  {"status": "offline", "tokens_today": 61471,
              "weekly_pct": 2.0, "weekly_window_min": 10080, "weekly_reset_min": 8729}
 }
@@ -97,7 +99,7 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
 ### 数据来源与局限
 
 - **额度（四家都是真实值）**：app 每 2 分钟调一次各自用量接口（见开头），拿到
-  Claude 5h/周、Codex 周、Grok Build 周、Kimi Code 5h/周窗口的已用百分比和重置时间。
+  Claude 5H/Weekly/Fable、Codex Weekly、Grok Build Weekly、Kimi Code 5h/周窗口的已用百分比和重置时间。
   四家额度都合并进 `/status` 下发给设备；Grok/Kimi 的设备页面默认关闭，用户在桥接
   App 设置中启用后可固定显示。接口 429 限流时
   自动退避 5 分钟并沿用上一次的数值。
@@ -344,9 +346,9 @@ ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedG
 
 - `firmware/scripts/build_web_firmware.py` 生成的分段文件和 `manifest.json` 继续提交到
   `web-flasher/`，它们供在线烧录器自动使用，不需要用户手动下载。
-- GitHub Release 只上传该版本的 `*-full.bin` 和从同一 tag 构建的
-  `AIClockBridge-*-macOS-arm64.app.zip`；不要再上传 bootloader、partitions、boot_app0、
-  application 或 manifest。
+- GitHub Release 只上传该版本的 `*-full.bin`、从同一 tag 构建的
+  `AIClockBridge-*-macOS-arm64.app.zip` 和 `AIClockBridge-*-Windows-x64.exe`；不要再上传
+  bootloader、partitions、boot_app0、application 或 manifest。
 - Release 正文保留该版本的主要变化，安装说明优先链接
   [在线烧录页面](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/)；手动安装只明确
   指向唯一的 `*-full.bin`，不再向普通用户罗列分段文件和烧录地址。正文还必须提醒用户：

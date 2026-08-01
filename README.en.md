@@ -42,7 +42,7 @@ at compile time and again when generating the Web image. See the
 
 To use the bundled flasher locally, run `python3 -m http.server 8000` from the repository root and
 open `http://localhost:8000/web-flasher/` in desktop Chrome or Edge. The verified build is
-`0.4.6-c3.14`.
+`0.4.6-c3.15`.
 
 > This port is based on [pengchujin/esp8266-ai](https://github.com/pengchujin/esp8266-ai).
 > ESP32-C3 is now the default target; the original `nodemcuv2` ESP8266 target remains available.
@@ -57,7 +57,7 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. A square progress ring plus large digits show your real 5-hour / weekly quota usage; when a window is used up the pet becomes a reset countdown, and the border flashes red when the AI is waiting for your approval. |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. Claude shows 5H, Weekly, and Fable quota usage; the other providers keep their applicable quota windows. When a window is used up the pet becomes a reset countdown, and the border flashes red when the AI is waiting for your approval. |
 | <img src="docs/images/feature2.jpg" width="360" alt="Network monitor"> | **Live network monitor**<br>Task-manager-style upload/download curves, 56-second rolling window, auto-scaling axis. |
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |

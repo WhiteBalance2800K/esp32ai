@@ -24,6 +24,8 @@ sealed class TrayAppContext : ApplicationContext
     readonly ToolStripMenuItem _deviceInfoItem = new("设备：未设置") { Enabled = false };
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
     readonly ToolStripMenuItem _marketInstrumentMenu = new("行情标的");
+    readonly ToolStripMenuItem _marketIntervalMenu = new("K线周期");
+    readonly ToolStripMenuItem _marketSettingsMenu = new("行情设置");
     readonly Dictionary<string, ToolStripMenuItem> _marketInstrumentItems = new();
     readonly Dictionary<int, ToolStripMenuItem> _marketRefreshItems = new();
     readonly Dictionary<string, ToolStripMenuItem> _petPresetItems = new();
@@ -157,7 +159,6 @@ sealed class TrayAppContext : ApplicationContext
         displayMenu.DropDownItems.Add(quotaMenu);
         _menu.Items.Add(displayMenu);
 
-        var intervalMenu = new ToolStripMenuItem("行情 K线周期");
         foreach (var (title, interval) in new[]
         {
             ("1 分钟", MarketInterval.OneMinute), ("5 分钟", MarketInterval.FiveMinutes),
@@ -166,21 +167,22 @@ sealed class TrayAppContext : ApplicationContext
         {
             var item = new ToolStripMenuItem(title) { Tag = interval };
             item.Click += (_, _) => { _market.SetInterval(interval); UpdateMarketMenuStates(); };
-            intervalMenu.DropDownItems.Add(item);
+            _marketIntervalMenu.DropDownItems.Add(item);
         }
-        _menu.Items.Add(intervalMenu);
 
-        var refreshMenu = new ToolStripMenuItem("行情刷新间隔");
+        var refreshMenu = new ToolStripMenuItem("刷新间隔");
         foreach (var seconds in new[] { 10, 30, 60, 120 })
         {
             var item = new ToolStripMenuItem($"{seconds} 秒");
             item.Click += (_, _) => { _market.SetRefreshInterval(seconds); UpdateMarketMenuStates(); };
             _marketRefreshItems[seconds] = item; refreshMenu.DropDownItems.Add(item);
         }
-        _menu.Items.Add(refreshMenu);
         RebuildMarketInstrumentMenu();
-        _menu.Items.Add(_marketInstrumentMenu);
-        _menu.Items.Add(MakeItem("搜索/添加行情…", (_, _) => SearchMarket()));
+        _marketSettingsMenu.DropDownItems.Add(_marketIntervalMenu);
+        _marketSettingsMenu.DropDownItems.Add(refreshMenu);
+        _marketSettingsMenu.DropDownItems.Add(_marketInstrumentMenu);
+        _marketSettingsMenu.DropDownItems.Add(MakeItem("搜索/添加", (_, _) => SearchMarket()));
+        _menu.Items.Add(_marketSettingsMenu);
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         var petMenu = new ToolStripMenuItem("桌宠外观");
@@ -260,7 +262,8 @@ sealed class TrayAppContext : ApplicationContext
 
     static string UsageLine(string name, ProviderUsage u, string weeklyLabel, bool showPrimary)
     {
-        if (u.Error != null && u.WeeklyPct == null && (!showPrimary || u.PrimaryPct == null)) return $"{name}：{u.Error}";
+        if (u.Error != null && u.WeeklyPct == null && u.FablePct == null
+            && (!showPrimary || u.PrimaryPct == null)) return $"{name}：{u.Error}";
         var parts = new List<string>();
         if (showPrimary && u.PrimaryPct.HasValue)
         {
@@ -274,11 +277,17 @@ sealed class TrayAppContext : ApplicationContext
             if (u.WeeklyResetMin.HasValue) s += $"（{FmtMin(u.WeeklyResetMin.Value)}）";
             parts.Add(s);
         }
+        if (u.FablePct.HasValue)
+        {
+            var s = $"Fable {(int)u.FablePct.Value}%";
+            if (u.FableResetMin.HasValue) s += $"（{FmtMin(u.FableResetMin.Value)}）";
+            parts.Add(s);
+        }
         return parts.Count == 0 ? $"{name}：额度未知" : $"{name}　" + string.Join("　", parts);
     }
 
     static string TodaySuffix(int tokens, double? cost)
-        => $"　今日 {tokens:N0} tok ≈{(cost.HasValue ? $"${cost.Value:F2}" : "$?")}";
+        => $"　今日 {tokens:N0} tok {(cost.HasValue ? $"${cost.Value:F2}" : "$?")}";
 
     static string FmtMin(int min)
     {
@@ -466,13 +475,9 @@ sealed class TrayAppContext : ApplicationContext
     {
         foreach (var pair in _marketInstrumentItems) pair.Value.Checked = pair.Key == _market.Instrument.Id;
         foreach (var pair in _marketRefreshItems) pair.Value.Checked = pair.Key == _market.RefreshSeconds;
-        foreach (ToolStripItem parent in _menu.Items)
-        {
-            if (parent is not ToolStripMenuItem { Text: "行情 K线周期" } intervalMenu) continue;
-            foreach (ToolStripItem child in intervalMenu.DropDownItems)
-                if (child is ToolStripMenuItem item && item.Tag is MarketInterval interval)
-                    item.Checked = interval == _market.Interval;
-        }
+        foreach (ToolStripItem child in _marketIntervalMenu.DropDownItems)
+            if (child is ToolStripMenuItem item && item.Tag is MarketInterval interval)
+                item.Checked = interval == _market.Interval;
     }
 
     void SearchMarket()

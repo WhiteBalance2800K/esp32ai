@@ -21,6 +21,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var modeItems: [String: NSMenuItem] = [:]
     private var marketInstrumentItems: [String: NSMenuItem] = [:]
     private let instrumentMenu = NSMenu()
+    private let marketIntervalMenu = NSMenu()
+    private let marketRefreshMenu = NSMenu()
     private static let showGrokKey = "show_grok_usage"
     private static let showKimiKey = "show_kimi_usage"
     private static let enableGrokScreenKey = "enable_grok_screen"
@@ -144,19 +146,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         displayItem.submenu = displayMenu
         menu.addItem(displayItem)
 
-        let btcIntervalMenu = NSMenu()
         for interval in MarketInterval.allCases {
             let item = NSMenuItem(title: interval.rawValue, action: #selector(setBTCInterval(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = interval.rawValue
             item.state = market.snapshot.interval == interval ? .on : .off
-            btcIntervalMenu.addItem(item)
+            marketIntervalMenu.addItem(item)
         }
-        let btcIntervalItem = NSMenuItem(title: "行情 K线周期", action: nil, keyEquivalent: "")
-        btcIntervalItem.submenu = btcIntervalMenu
-        menu.addItem(btcIntervalItem)
+        let btcIntervalItem = NSMenuItem(title: "K线周期", action: nil, keyEquivalent: "")
+        btcIntervalItem.submenu = marketIntervalMenu
 
-        let marketRefreshMenu = NSMenu()
         for interval in MarketRefreshInterval.allCases {
             let item = NSMenuItem(title: interval.title,
                                   action: #selector(setMarketRefreshInterval(_:)),
@@ -166,15 +165,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             item.state = market.selectedRefreshInterval == interval ? .on : .off
             marketRefreshMenu.addItem(item)
         }
-        let marketRefreshItem = NSMenuItem(title: "行情刷新间隔", action: nil, keyEquivalent: "")
+        let marketRefreshItem = NSMenuItem(title: "刷新间隔", action: nil, keyEquivalent: "")
         marketRefreshItem.submenu = marketRefreshMenu
-        menu.addItem(marketRefreshItem)
 
         rebuildMarketInstrumentMenu()
         let instrumentItem = NSMenuItem(title: "行情标的", action: nil, keyEquivalent: "")
         instrumentItem.submenu = instrumentMenu
-        menu.addItem(instrumentItem)
-        menu.addItem(makeItem("搜索/添加行情…", #selector(searchMarket)))
+        let marketSettingsMenu = NSMenu()
+        marketSettingsMenu.addItem(btcIntervalItem)
+        marketSettingsMenu.addItem(marketRefreshItem)
+        marketSettingsMenu.addItem(instrumentItem)
+        marketSettingsMenu.addItem(makeItem("搜索/添加", #selector(searchMarket)))
+        let marketSettingsItem = NSMenuItem(title: "行情设置", action: nil, keyEquivalent: "")
+        marketSettingsItem.submenu = marketSettingsMenu
+        menu.addItem(marketSettingsItem)
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         let petMenu = NSMenu()
@@ -259,7 +263,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private static func usageLine(name: String, u: ProviderUsage, weeklyLabel: String,
                                   showPrimary: Bool) -> String {
-        let hasQuota = u.weeklyPct != nil || (showPrimary && u.primaryPct != nil)
+        let hasQuota = u.weeklyPct != nil || u.fablePct != nil || (showPrimary && u.primaryPct != nil)
         if let err = u.error, !hasQuota { return "\(name)：\(err)" }
         var parts: [String] = []
         if showPrimary, let p = u.primaryPct {
@@ -270,6 +274,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if let p = u.weeklyPct {
             var s = "\(weeklyLabel) \(Int(p))%"
             if let m = u.weeklyResetMin { s += "（\(fmtMin(m))）" }
+            parts.append(s)
+        }
+        if let p = u.fablePct {
+            var s = "Fable \(Int(p))%"
+            if let m = u.fableResetMin { s += "（\(fmtMin(m))）" }
             parts.append(s)
         }
         return parts.isEmpty ? "\(name)：额度未知" : "\(name)　" + parts.joined(separator: "　")
@@ -283,7 +292,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private static func todaySuffix(tokens: Int, cost: Double?) -> String {
         let amount = cost.map { String(format: "$%.2f", $0) } ?? "$?"
-        return "　今日 \(tokens.formatted()) tok ≈\(amount)"
+        return "　今日 \(tokens.formatted()) tok \(amount)"
     }
 
     private func refreshDeviceSection() {
@@ -532,9 +541,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func updateMarketRefreshIntervalStates() {
-        guard let refreshMenu = controlMenu.items.first(where: { $0.title == "行情刷新间隔" })?.submenu else { return }
         let selected = market.selectedRefreshInterval.rawValue
-        refreshMenu.items.forEach { item in
+        marketRefreshMenu.items.forEach { item in
             item.state = (item.representedObject as? String) == selected ? .on : .off
         }
     }

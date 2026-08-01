@@ -7,7 +7,7 @@
 
 - **左键托盘图标** → ESP32-C3 / ESP8266 屏幕实时镜像（额度环 + 桌宠动画 + 网速图 + 音乐页 + 行情页，
   与设备渲染同一份数据），底部附 自动/Claude/Codex/网速/音乐/行情 快速切换
-- **右键托盘图标** → 控制菜单：Claude 5h/周、Codex Weekly、Grok Build Weekly、
+- **右键托盘图标** → 控制菜单：Claude 5H/Weekly/Fable、Codex Weekly、Grok Build Weekly、
   Kimi Code 5h/周额度、今日 Token 与折算金额、
   自动查找并配对设备、设置设备地址、屏幕显示模式、经典宠物 / 咖色边牧及大小、
   petdex 桌宠画廊、恢复默认动画、
@@ -25,8 +25,9 @@
 - 音乐页读系统级 Now Playing（WinRT `GlobalSystemMediaTransportControlsSessionManager`，
   Spotify / 浏览器 / 本地播放器都能识别）；网速取物理网卡（以太网/WiFi）字节计数，
   4Hz 采样，排除 VPN/虚拟网卡
-- 行情支持 BTC/ETH、A股、港股、美股、韩股及常用指数，1/5/60 分钟 K线，
-  10/30/60/120 秒轮换；帧在后台预取、渲染并压缩，切换时一次更新
+- 行情支持 BTC/ETH、A股、港股、美股、韩股及常用指数；“行情设置”统一收纳
+  1/5/60 分钟 K线、10/30/60/120 秒刷新、行情标的与搜索/添加。帧在后台预取、
+  渲染并压缩，切换时一次更新
 - AUTO 根据最近真实活动选择 Claude Code / Codex；Fast / Priority 模式每次执行任务触发
   2.4 秒 Ludicrous 动画，当日统计窗口为本机时间 00:01–23:59
 
