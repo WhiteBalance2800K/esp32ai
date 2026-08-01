@@ -344,11 +344,13 @@ ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedG
 
 - `firmware/scripts/build_web_firmware.py` 生成的分段文件和 `manifest.json` 继续提交到
   `web-flasher/`，它们供在线烧录器自动使用，不需要用户手动下载。
-- GitHub Release 的附件只上传该版本的 `*-full.bin`，不要再上传 bootloader、partitions、
-  boot_app0、application 或 manifest。
+- GitHub Release 只上传该版本的 `*-full.bin` 和从同一 tag 构建的
+  `AIClockBridge-*-macOS-arm64.app.zip`；不要再上传 bootloader、partitions、boot_app0、
+  application 或 manifest。
 - Release 正文保留该版本的主要变化，安装说明优先链接
   [在线烧录页面](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/)；手动安装只明确
-  指向唯一的 `*-full.bin`，不再向普通用户罗列分段文件和烧录地址。
+  指向唯一的 `*-full.bin`，不再向普通用户罗列分段文件和烧录地址。正文还必须提醒用户：
+  更新 ESP32 固件时同步更新电脑桥接程序，网页烧录不会自动更新电脑 App。
 
 ## 已知限制 / TODO
 

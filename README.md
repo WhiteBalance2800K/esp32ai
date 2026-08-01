@@ -116,9 +116,12 @@ python3 -m http.server 8000
 
 ### 第 3 步 · 装桥接程序
 
+> **升级 ESP32 固件时，也要同步更新电脑上的桥接程序。** 网页烧录只会更新小屏固件，
+> 不会自动更新电脑 App；两边版本不一致时，新功能可能无法显示或控制。
+
 从 [Releases](https://github.com/WhiteBalance2800K/esp32ai/releases/latest) 下载并打开：
 
-- **macOS**：`AIClockBridge-*-macOS.dmg`，拖入 Applications（ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许，并同意本地网络权限）
+- **macOS（Apple Silicon）**：下载 `AIClockBridge-*-macOS-arm64.app.zip`，解压后把 `.app` 拖入 Applications（ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许，并同意本地网络权限）
 - **Windows**：`AIClockBridge-*-Windows-x64.exe`，双击即用
 
 桥接程序常驻菜单栏 / 托盘，会**自动发现并配对**同一局域网内的设备——到这里屏幕就活了。

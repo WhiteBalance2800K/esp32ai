@@ -84,9 +84,12 @@ On first boot the device opens a hotspot named **`AI-Clock-Setup`**: join it fro
 
 ### Step 3 · Install the bridge app
 
+> **Update the desktop bridge whenever you update the ESP32 firmware.** Web
+> flashing updates only the display; mismatched versions may hide or break new features.
+
 Download from [Releases](https://github.com/WhiteBalance2800K/esp32ai/releases/latest) and open:
 
-- **macOS**: `AIClockBridge-*-macOS.dmg`, drag into Applications (ad-hoc signed; on first launch allow it in "System Settings → Privacy & Security" and grant local-network access)
+- **macOS (Apple Silicon)**: download `AIClockBridge-*-macOS-arm64.app.zip`, unzip it, and drag the `.app` into Applications (ad-hoc signed; on first launch allow it in "System Settings → Privacy & Security" and grant local-network access)
 - **Windows**: `AIClockBridge-*-Windows-x64.exe`, just double-click
 
 The bridge lives in your menu bar / tray and **auto-discovers and pairs** with the device on the same LAN — at this point the screen comes alive.
