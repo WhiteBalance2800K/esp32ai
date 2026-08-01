@@ -106,9 +106,9 @@ python3 -m http.server 8000
 
 > 弹窗里看不到串口？Windows 需要装 [CH340 驱动](https://www.wch.cn/downloads/CH341SER_EXE.html)，Mac 系统自带无需安装；换根 USB 线（很多线只能充电）；更多排查见[官网 FAQ](https://mac.qust.me/#flash-faq)。
 >
-> 命令行烧录请从本项目的 [Releases](https://github.com/WhiteBalance2800K/esp32ai/releases/latest)
-> 下载 ESP32-C3 四段固件并按 Release 中标注的偏移写入。普通升级推荐直接使用线上 Web
-> 烧录器且不要勾选“抹除”；`*-full.bin` 只用于首次安装或明确需要全量恢复的情况。
+> ESP32-C3 用户请优先使用[在线 Web 烧录器](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/)，
+> 页面会自动选择正确的固件，不需要自己组合文件。必须手动烧录某个版本时，只下载对应
+> Release 中唯一的 `*-full.bin` 固件；`Source code` 不是可烧录文件。
 
 ### 第 2 步 · 配 WiFi
 

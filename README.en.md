@@ -72,11 +72,11 @@ Open **[mac.qust.me/#flash](https://mac.qust.me/#flash)** in Chrome / Edge, plug
 
 > Serial port not showing up? On Windows install the [CH340 driver](https://www.wch.cn/downloads/CH341SER_EXE.html); macOS has it built in. Try another USB cable (many are charge-only). More troubleshooting in the [website FAQ](https://mac.qust.me/#flash-faq).
 >
-> For command-line flashing, download the four ESP32-C3 segments from this
-> project's [Releases](https://github.com/WhiteBalance2800K/esp32ai/releases/latest)
-> and write them at the offsets listed in the release. For normal updates,
-> prefer the online Web Flasher without enabling erase. Use `*-full.bin` only
-> for first-time installation or an explicit full recovery.
+> ESP32-C3 users should use the
+> [online Web Flasher](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/),
+> which selects the correct firmware automatically. If you must flash a specific
+> version manually, download the single `*-full.bin` file from that Release;
+> the automatically listed `Source code` archives are not flashable firmware.
 
 ### Step 2 · Connect WiFi
 

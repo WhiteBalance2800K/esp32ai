@@ -340,6 +340,16 @@ ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedG
   对循环角色动画来说无所谓。
 - WiFi 上传大文件偶尔会瞬时掉线（broken pipe 之类），失败重新上传一次即可。
 
+## GitHub Release 发布规则
+
+- `firmware/scripts/build_web_firmware.py` 生成的分段文件和 `manifest.json` 继续提交到
+  `web-flasher/`，它们供在线烧录器自动使用，不需要用户手动下载。
+- GitHub Release 的附件只上传该版本的 `*-full.bin`，不要再上传 bootloader、partitions、
+  boot_app0、application 或 manifest。
+- Release 正文保留该版本的主要变化，安装说明优先链接
+  [在线烧录页面](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/)；手动安装只明确
+  指向唯一的 `*-full.bin`，不再向普通用户罗列分段文件和烧录地址。
+
 ## 已知限制 / TODO
 
 - 参考项目里的“黄色闪烁-需要处理”“红色闪烁-需要批准”这类更细的状态，目前本地日志
