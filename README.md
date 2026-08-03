@@ -4,7 +4,7 @@
 
 <h1 align="center">ESP32 AI 小屏幕</h1>
 
-<p align="center">ESP32-C3 / ESP8266 · 240×240 TFT · Claude Code / Codex 桌面伴侣</p>
+<p align="center">ESP32-C3 · 240×240 TFT · Claude Code / Codex 桌面伴侣</p>
 
 <p align="center">
   中文 ·
@@ -15,15 +15,15 @@
   <a href="https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/">在线 Web 烧录</a> ·
   <a href="docs/ESP32-C3.md">ESP32-C3 烧录说明</a> ·
   <a href="web-flasher/">本地 Web 烧录器</a> ·
-  <a href="https://github.com/pengchujin/esp8266-ai">上游 ESP8266 项目</a>
+  <a href="https://github.com/pengchujin/esp8266-ai">参考 ESP8266 项目</a>
 </p>
 
-## 先看：ESP32-C3 1.54 寸屏幕点亮避坑
+## 重点：ESP32-C3 1.54 寸屏幕点亮避坑
 
-这个移植最容易出现的现象是：**固件正常启动、Wi-Fi 和桥接程序都能通信，但屏幕全黑，
+ESP32 刷固件初期最容易出现的现象是：屏幕全黑，**但固件正常启动、Wi-Fi 和桥接程序都能通信，
 只能从侧面看到微弱闪烁。** 此时不要先怀疑屏幕损坏，也不要照搬 ESP8266 的引脚。
 
-我们最初根据低清原理图截图读出了错误的 GPIO，屏幕始终没有数据。最终从烧录前保存的
+最初根据原理图截图读出了错误的 GPIO，屏幕始终没有数据。最终从烧录前保存的
 4MB 原厂 Flash 中只读分析出原厂 `TFT_eSPI` 初始化代码，确认它使用
 `ST7789_2_DRIVER`，并实际调用 `SPI.begin(3, 5, 5, -1)`。原厂 GPIO 设置和本项目采用的
 最终引脚如下：
@@ -57,7 +57,7 @@
 
 ### Web 烧录
 
-普通用户请优先打开线上烧录页：
+线上直接烧录页：
 
 **[https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/](https://whitebalance2800k.github.io/post/esp32-c3-ai-clock/)**
 
